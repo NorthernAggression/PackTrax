@@ -1,6 +1,6 @@
 {
-  "name": "PackTrack",
-  "short_name": "PackTrack",
+  "name": "PackTrax",
+  "short_name": "PackTrax",
   "description": "Dog walk tracker for the whole pack",
   "start_url": "./index.html",
   "scope": "./",

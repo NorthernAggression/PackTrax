@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#172219">
-<title>PackTrack</title>
+<title>PackTrax</title>
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
@@ -196,7 +196,7 @@
 </head>
 <body>
 <div class="app">
-  <div class="header"><h1>PackTrack</h1><span class="paw">🐾</span></div>
+  <div class="header"><h1>PackTrax</h1><span class="paw">🐾</span></div>
   <div class="subtitle">walk log for the whole crew</div>
 
   <div class="tabs">
@@ -231,6 +231,7 @@ let invoicePrices = {};
 let peeCount = 0;
 let poopCount = 0;
 let draftDistance = '';
+let draftDistanceIsAuto = true;
 let draftNote = '';
 
 function adjustCount(which, delta){
@@ -274,6 +275,7 @@ let geoWatchId = null;
 let currentRoute = [];       // [{lat,lng}] recorded during the active walk
 let lastSavedRoute = [];     // route attached to the walk just stopped, for the save screen
 let geoStatus = 'idle';      // idle | locating | tracking | denied | unavailable
+let routeSnapStatus = 'idle'; // idle | snapping | done | failed
 let liveMap = null, livePolyline = null, liveMarker = null;
 
 function haversine(a, b){
@@ -287,6 +289,43 @@ function routeDistanceMiles(route){
   let meters = 0;
   for(let i=1;i<route.length;i++) meters += haversine(route[i-1], route[i]);
   return meters / 1609.34;
+}
+
+// Snap a recorded GPS trace onto the actual street/path network so it
+// doesn't cut straight lines across gaps caused by weak GPS signal.
+// Uses OpenStreetMap Germany's free public OSRM "foot" map-matching service.
+async function attemptRouteSnap(){
+  if(lastSavedRoute.length < 2) return;
+  routeSnapStatus = 'snapping';
+  if(walkStopped && activeTab==='track') render();
+  try{
+    let pts = lastSavedRoute;
+    if(pts.length > 100){
+      const step = Math.ceil(pts.length/100);
+      pts = pts.filter((_,i)=> i%step===0 || i===pts.length-1);
+    }
+    const coordStr = pts.map(p=>`${p.lng.toFixed(6)},${p.lat.toFixed(6)}`).join(';');
+    const radii = pts.map(()=>'30').join(';');
+    const url = `https://routing.openstreetmap.de/routed-foot/match/v1/foot/${coordStr}?geometries=geojson&overview=full&radiuses=${radii}`;
+    const res = await fetch(url);
+    if(!res.ok) throw new Error('match request failed: '+res.status);
+    const data = await res.json();
+    if(data.code !== 'Ok' || !data.matchings || !data.matchings.length) throw new Error('no match');
+    const snapped = [];
+    data.matchings.forEach(m=>{
+      m.geometry.coordinates.forEach(([lng,lat])=> snapped.push({lat,lng}));
+    });
+    if(snapped.length > 1){
+      lastSavedRoute = snapped;
+      routeSnapStatus = 'done';
+    } else {
+      routeSnapStatus = 'failed';
+    }
+  }catch(e){
+    console.warn('route snap failed', e);
+    routeSnapStatus = 'failed';
+  }
+  if(walkStopped && activeTab==='track') render();
 }
 
 function startGeoTracking(){
@@ -449,6 +488,7 @@ function startTimer(){
   if(selectedDogIds.length===0) return;
   timerRunning = true;
   walkStopped = false;
+  routeSnapStatus = 'idle';
   timerStart = Date.now() - elapsedMs;
   timerInterval = setInterval(()=>{
     elapsedMs = Date.now() - timerStart;
@@ -465,6 +505,7 @@ function stopTimer(){
   stopGeoTracking();
   walkStopped = true;
   render();
+  attemptRouteSnap();
 }
 
 function discardWalk(){
@@ -472,10 +513,12 @@ function discardWalk(){
   selectedDogIds = [];
   lastSavedRoute = [];
   geoStatus = 'idle';
+  routeSnapStatus = 'idle';
   walkStopped = false;
   peeCount = 0;
   poopCount = 0;
   draftDistance = '';
+  draftDistanceIsAuto = true;
   draftNote = '';
   render();
 }
@@ -498,10 +541,12 @@ async function saveWalk(distance, note){
   selectedDogIds = [];
   lastSavedRoute = [];
   geoStatus = 'idle';
+  routeSnapStatus = 'idle';
   walkStopped = false;
   peeCount = 0;
   poopCount = 0;
   draftDistance = '';
+  draftDistanceIsAuto = true;
   draftNote = '';
   switchTab('history');
 }
@@ -527,11 +572,14 @@ function renderTrack(container){
     html += `<div class="empty"><div class="empty-title">No dogs yet</div>Add a dog on the Dogs tab before you start a walk.</div>`;
   } else if(justStopped){
     const gpsDist = lastSavedRoute.length>1 ? routeDistanceMiles(lastSavedRoute).toFixed(2) : '';
-    if(draftDistance === '' && gpsDist) draftDistance = gpsDist;
+    if(draftDistanceIsAuto && gpsDist) draftDistance = gpsDist;
+    else if(draftDistance === '' && gpsDist) draftDistance = gpsDist;
     html += `
       <h3 style="margin-bottom:10px;color:var(--ink);">Walk complete</h3>
       <div class="timer-display" style="padding:4px 0 14px;">${fmtTime(elapsedMs)}</div>
       ${lastSavedRoute.length>1 ? '<div class="map-box large" id="savedRouteMap"></div>' : ''}
+      ${routeSnapStatus==='snapping' ? '<div class="geo-status">Snapping route to roads…</div>' : ''}
+      ${routeSnapStatus==='failed' ? '<div class="geo-status">Couldn\'t snap to roads — showing recorded GPS path.</div>' : ''}
       <div class="field" style="margin-top:14px;">
         <label>Distance (miles${gpsDist? ', from GPS — edit if needed':', optional'})</label>
         <input type="number" step="0.1" id="distInput" placeholder="e.g. 1.2" value="${draftDistance}">
@@ -596,7 +644,7 @@ function renderTrack(container){
     saveWalk(dist, note);
   });
   const distInput = container.querySelector('#distInput');
-  if(distInput) distInput.addEventListener('input', e=>draftDistance=e.target.value);
+  if(distInput) distInput.addEventListener('input', e=>{ draftDistance=e.target.value; draftDistanceIsAuto=false; });
   const noteInput = container.querySelector('#noteInput');
   if(noteInput) noteInput.addEventListener('input', e=>draftNote=e.target.value);
   wireCounters(container);
@@ -777,7 +825,7 @@ async function buildWalkSnapshot(w){
   let y = padding;
   ctx.fillStyle = '#6a634c';
   ctx.font = '600 13px Inter, sans-serif';
-  ctx.fillText('🐾 PACKTRACK', padding, y);
+  ctx.fillText('🐾 PACKTRAX', padding, y);
   y += 34;
 
   ctx.fillStyle = '#211f14';
@@ -857,9 +905,9 @@ async function shareWalk(w){
     const file = new File([blob], 'walk.png', {type:'image/png'});
     const text = `Walk with ${dogNames} — ${fmtTime(w.durationMs)}${w.distance? ', '+w.distance+' mi':''}`;
     if(navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({ files:[file], title:'PackTrack walk', text });
+      await navigator.share({ files:[file], title:'PackTrax walk', text });
     } else if(navigator.share){
-      try{ await navigator.share({ title:'PackTrack walk', text }); }
+      try{ await navigator.share({ title:'PackTrax walk', text }); }
       catch(e){ downloadBlob(blob, 'walk.png'); }
     } else {
       downloadBlob(blob, 'walk.png');
@@ -916,7 +964,7 @@ async function buildInvoiceSnapshot(items){
   let y = padding;
   ctx.fillStyle = '#6a634c';
   ctx.font = '600 13px Inter, sans-serif';
-  ctx.fillText('🐾 PACKTRACK', padding, y);
+  ctx.fillText('🐾 PACKTRAX', padding, y);
   y += 34;
 
   ctx.fillStyle = '#211f14';
@@ -975,11 +1023,11 @@ async function shareInvoice(items){
     if(!blob) return;
     const total = items.reduce((a,{price})=>a+price, 0);
     const file = new File([blob], 'invoice.png', {type:'image/png'});
-    const text = `PackTrack invoice — ${items.length} walk${items.length!==1?'s':''}, total $${total.toFixed(2)}`;
+    const text = `PackTrax invoice — ${items.length} walk${items.length!==1?'s':''}, total $${total.toFixed(2)}`;
     if(navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({ files:[file], title:'PackTrack invoice', text });
+      await navigator.share({ files:[file], title:'PackTrax invoice', text });
     } else if(navigator.share){
-      try{ await navigator.share({ title:'PackTrack invoice', text }); }
+      try{ await navigator.share({ title:'PackTrax invoice', text }); }
       catch(e){ downloadBlob(blob, 'invoice.png'); }
     } else {
       downloadBlob(blob, 'invoice.png');
