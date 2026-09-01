@@ -791,7 +791,98 @@ function drawRouteSketch(ctx, route, x, y, w, h){
   ctx.fillStyle = '#e8b23e'; ctx.beginPath(); ctx.arc(lx,ly,6,0,Math.PI*2); ctx.fill();
 }
 
-async function buildWalkSnapshot(w){
+// ---- Static street-map renderer for snapshots (uses CORS-enabled tiles) ----
+function lon2tileX(lon, zoom){ return (lon+180)/360 * Math.pow(2,zoom); }
+function lat2tileY(lat, zoom){
+  const r = lat*Math.PI/180;
+  return (1 - Math.log(Math.tan(r) + 1/Math.cos(r))/Math.PI) / 2 * Math.pow(2,zoom);
+}
+function loadTileImage(url){
+  return new Promise(resolve=>{
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = ()=>resolve(img);
+    img.onerror = ()=>resolve(null);
+    img.src = url;
+  });
+}
+async function renderMapCanvas(route, targetW, targetH){
+  const TILE = 256;
+  const lats = route.map(p=>p.lat), lngs = route.map(p=>p.lng);
+  let minLat=Math.min(...lats), maxLat=Math.max(...lats);
+  let minLng=Math.min(...lngs), maxLng=Math.max(...lngs);
+  const latPad = Math.max((maxLat-minLat)*0.18, 0.0006);
+  const lngPad = Math.max((maxLng-minLng)*0.18, 0.0006);
+  minLat-=latPad; maxLat+=latPad; minLng-=lngPad; maxLng+=lngPad;
+
+  let zoom = 18, x0,y0,x1,y1;
+  for(; zoom>=2; zoom--){
+    x0 = lon2tileX(minLng, zoom); x1 = lon2tileX(maxLng, zoom);
+    y0 = lat2tileY(maxLat, zoom); y1 = lat2tileY(minLat, zoom);
+    if((x1-x0)*TILE <= targetW*1.4 && (y1-y0)*TILE <= targetH*1.4) break;
+  }
+
+  const txMin = Math.floor(x0), txMax = Math.floor(x1);
+  const tyMin = Math.floor(y0), tyMax = Math.floor(y1);
+  const gridW = (txMax-txMin+1)*TILE, gridH = (tyMax-tyMin+1)*TILE;
+  const gridCanvas = document.createElement('canvas');
+  gridCanvas.width = gridW; gridCanvas.height = gridH;
+  const gctx = gridCanvas.getContext('2d');
+
+  const subdomains = ['a','b','c','d'];
+  let si = 0;
+  const loads = [];
+  for(let tx=txMin; tx<=txMax; tx++){
+    for(let ty=tyMin; ty<=tyMax; ty++){
+      const s = subdomains[si++ % subdomains.length];
+      const url = `https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${zoom}/${tx}/${ty}.png`;
+      loads.push(loadTileImage(url).then(img=>{
+        if(img) gctx.drawImage(img, (tx-txMin)*TILE, (ty-tyMin)*TILE, TILE, TILE);
+      }));
+    }
+  }
+  await Promise.all(loads);
+
+  const srcX = (x0-txMin)*TILE, srcY = (y0-tyMin)*TILE;
+  const srcW = (x1-x0)*TILE, srcH = (y1-y0)*TILE;
+  const fitScale = Math.min(targetW/srcW, targetH/srcH);
+  const drawW = srcW*fitScale, drawH = srcH*fitScale;
+  const offsetX = (targetW-drawW)/2, offsetY = (targetH-drawH)/2;
+
+  const outCanvas = document.createElement('canvas');
+  outCanvas.width = targetW; outCanvas.height = targetH;
+  const octx = outCanvas.getContext('2d');
+  octx.fillStyle = '#dcd6c2';
+  octx.fillRect(0,0,targetW,targetH);
+  octx.drawImage(gridCanvas, srcX, srcY, srcW, srcH, offsetX, offsetY, drawW, drawH);
+
+  const project = p => {
+    const gx = (lon2tileX(p.lng, zoom)-txMin)*TILE;
+    const gy = (lat2tileY(p.lat, zoom)-tyMin)*TILE;
+    return [ offsetX + (gx-srcX)*fitScale, offsetY + (gy-srcY)*fitScale ];
+  };
+
+  octx.beginPath();
+  route.forEach((p,i)=>{
+    const [px,py] = project(p);
+    if(i===0) octx.moveTo(px,py); else octx.lineTo(px,py);
+  });
+  octx.strokeStyle = '#fff'; octx.lineWidth = 7; octx.lineJoin='round'; octx.lineCap='round';
+  octx.stroke();
+  octx.strokeStyle = '#c1502e'; octx.lineWidth = 4;
+  octx.stroke();
+
+  [[route[0],'#3e7ca6'], [route[route.length-1],'#e8b23e']].forEach(([p,color])=>{
+    const [px,py] = project(p);
+    octx.fillStyle = '#fff'; octx.beginPath(); octx.arc(px,py,8,0,Math.PI*2); octx.fill();
+    octx.fillStyle = color; octx.beginPath(); octx.arc(px,py,6,0,Math.PI*2); octx.fill();
+  });
+
+  return outCanvas;
+}
+
+async function buildWalkSnapshot(w, opts={}){
+  const useMap = opts.useMap !== false;
   try{ await document.fonts.ready; }catch(e){}
   const W = 640, padding = 32, contentW = W - padding*2;
   const measure = document.createElement('canvas').getContext('2d');
@@ -806,10 +897,16 @@ async function buildWalkSnapshot(w){
   }
   const hasRoute = w.route && w.route.length>1;
 
+  let mapCanvas = null;
+  if(hasRoute && useMap){
+    try{ mapCanvas = await renderMapCanvas(w.route, contentW, 220); }
+    catch(e){ console.warn('map render failed, will fall back to sketch', e); mapCanvas = null; }
+  }
+
   let H = padding + 34 + 40 + 44 + 60;
   if(w.pee || w.poop) H += 34;
   if(noteLines.length) H += 6 + noteLines.length*22;
-  if(hasRoute) H += 200;
+  if(hasRoute) H += (mapCanvas ? 220 : 180) + 20;
   H += padding;
 
   const scale = 2;
@@ -882,11 +979,29 @@ async function buildWalkSnapshot(w){
   }
 
   if(hasRoute){
-    drawRouteSketch(ctx, w.route, padding, y, contentW, 180);
-    y += 200;
+    if(mapCanvas){
+      ctx.save();
+      roundRectPath(ctx, padding, y, contentW, 220, 8);
+      ctx.clip();
+      ctx.drawImage(mapCanvas, padding, y, contentW, 220);
+      ctx.restore();
+      y += 220;
+    } else {
+      drawRouteSketch(ctx, w.route, padding, y, contentW, 180);
+      y += 180;
+    }
+    y += 20;
   }
 
-  return new Promise(resolve => canvas.toBlob(blob=>resolve(blob), 'image/png'));
+  return new Promise(resolve => {
+    canvas.toBlob(blob=>{
+      if(blob){ resolve(blob); return; }
+      // toBlob returned null — likely a tainted canvas from cross-origin tiles.
+      // Retry without the map image so sharing still works.
+      if(useMap){ resolve(buildWalkSnapshot(w, {useMap:false})); }
+      else resolve(null);
+    }, 'image/png');
+  });
 }
 
 function downloadBlob(blob, filename){
