@@ -328,6 +328,33 @@ async function attemptRouteSnap(){
   if(walkStopped && activeTab==='track') render();
 }
 
+// Screen Wake Lock — prevents the display from sleeping while a walk is
+// being tracked, since browsers pause GPS updates once the screen locks.
+let wakeLock = null;
+let wakeLockSupported = 'wakeLock' in navigator;
+
+async function requestWakeLock(){
+  if(!wakeLockSupported) return;
+  try{
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', ()=>{ wakeLock = null; });
+  }catch(e){
+    console.warn('wake lock request failed', e);
+    wakeLock = null;
+  }
+}
+function releaseWakeLock(){
+  if(wakeLock){
+    wakeLock.release().catch(()=>{});
+    wakeLock = null;
+  }
+}
+document.addEventListener('visibilitychange', async ()=>{
+  if(document.visibilityState === 'visible' && timerRunning && !wakeLock){
+    await requestWakeLock();
+  }
+});
+
 function startGeoTracking(){
   if(!('geolocation' in navigator)){
     geoStatus = 'unavailable';
@@ -496,6 +523,7 @@ function startTimer(){
     if(disp) disp.textContent = fmtTime(elapsedMs);
   }, 500);
   startGeoTracking();
+  requestWakeLock();
   render();
 }
 
@@ -503,6 +531,7 @@ function stopTimer(){
   timerRunning = false;
   clearInterval(timerInterval);
   stopGeoTracking();
+  releaseWakeLock();
   walkStopped = true;
   render();
   attemptRouteSnap();
@@ -611,6 +640,11 @@ function renderTrack(container){
         html += `<div class="geo-status warn">Location isn't available here — you can still enter distance manually when you stop.</div>`;
       } else {
         html += `<div class="geo-status" id="geoStatusText">${geoStatus==='locating' ? 'Finding your location…' : `Tracking · ${routeDistanceMiles(currentRoute).toFixed(2)} mi so far`}</div>`;
+      }
+      if(wakeLockSupported && wakeLock){
+        html += `<div class="geo-status">🔆 Keeping your screen awake for accurate tracking</div>`;
+      } else if(!wakeLockSupported){
+        html += `<div class="geo-status warn">Your browser can't keep the screen awake automatically — try to keep it unlocked while you walk for the best route accuracy.</div>`;
       }
     }
     if(!timerRunning){
