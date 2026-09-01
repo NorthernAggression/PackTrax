@@ -1166,13 +1166,37 @@ async function buildInvoiceSnapshot(items){
   return new Promise(resolve => canvas.toBlob(blob=>resolve(blob), 'image/png'));
 }
 
+function buildVenmoLink(items){
+  const total = items.reduce((a,{price})=>a+price, 0);
+  const totalStr = total.toFixed(2);
+
+  const dogNameSet = new Set();
+  items.forEach(({walk})=>{
+    walk.dogIds.forEach(id=>{
+      const dog = dogById(id);
+      dogNameSet.add(dog ? dog.name : 'Unknown');
+    });
+  });
+  const dogNames = Array.from(dogNameSet).join(' & ');
+
+  const dates = items.map(({walk})=> new Date(walk.date)).sort((a,b)=>a-b);
+  const fmtShort = d => d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  const minStr = fmtShort(dates[0]);
+  const maxStr = fmtShort(dates[dates.length-1]);
+  const dateRange = minStr===maxStr ? minStr : `${minStr}-${maxStr}`;
+
+  const note = `${dogNames} ${dateRange}`.trim().replace(/\s+/g, '+');
+  return `venmo.com/tjrichert?txn=pay&amount=${totalStr}&note=${note}`;
+}
+
 async function shareInvoice(items){
   try{
     const blob = await buildInvoiceSnapshot(items);
     if(!blob) return;
     const total = items.reduce((a,{price})=>a+price, 0);
+    const venmoLink = buildVenmoLink(items);
     const file = new File([blob], 'invoice.png', {type:'image/png'});
-    const text = `PackTrax invoice — ${items.length} walk${items.length!==1?'s':''}, total $${total.toFixed(2)}`;
+    const text = `PackTrax invoice — ${items.length} walk${items.length!==1?'s':''}, total $${total.toFixed(2)}\nPay with Venmo: ${venmoLink}\nPay with Zelle: 651-269-9107`;
     if(navigator.canShare && navigator.canShare({files:[file]})){
       await navigator.share({ files:[file], title:'PackTrax invoice', text });
     } else if(navigator.share){
@@ -1246,6 +1270,7 @@ function renderInvoice(container){
     });
     html += `<div class="invoice-total-row"><span>Total</span><span id="invoiceTotalVal">$${total.toFixed(2)}</span></div>
       <button class="btn-primary" id="shareInvoiceBtn" style="margin-top:16px;">📤 Share invoice</button>
+      <div class="geo-status" style="margin-top:8px;">Includes "Pay by Venmo" and "Pay by Zelle" details in the message</div>
     </div>`;
   }
 
