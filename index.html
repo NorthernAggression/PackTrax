@@ -1186,17 +1186,16 @@ function buildVenmoLink(items){
   const dateRange = minStr===maxStr ? minStr : `${minStr}-${maxStr}`;
 
   const note = `${dogNames} ${dateRange}`.trim().replace(/\s+/g, '+');
-  return `venmo.com/tjrichert?txn=pay&amount=${totalStr}&note=${note}`;
+  return `https://venmo.com/tjrichert?txn=pay&amount=${totalStr}&note=${note}`;
 }
 
 async function shareInvoice(items){
   try{
     const blob = await buildInvoiceSnapshot(items);
     if(!blob) return;
-    const total = items.reduce((a,{price})=>a+price, 0);
     const venmoLink = buildVenmoLink(items);
     const file = new File([blob], 'invoice.png', {type:'image/png'});
-    const text = `PackTrax invoice — ${items.length} walk${items.length!==1?'s':''}, total $${total.toFixed(2)}\nPay with Venmo: ${venmoLink}\nPay with Zelle: 651-269-9107`;
+    const text = `Pay with Zelle: 651-269-9107\nPay with Venmo: ${venmoLink}`;
     if(navigator.canShare && navigator.canShare({files:[file]})){
       await navigator.share({ files:[file], title:'PackTrax invoice', text });
     } else if(navigator.share){
