@@ -23,6 +23,7 @@
     --ink-dim:#6a634c;
     --blaze-yellow:#e8b23e;
     --blaze-blue:#3e7ca6;
+    --trail-green:#4a8a5c;
     --rust:#c1502e;
     --line:#8c8464;
     --border:#33452f;
@@ -72,10 +73,12 @@
   .timer-sub{text-align:center;color:var(--ink-dim);font-size:12px;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:16px;}
   button{font-family:'Oswald',sans-serif;letter-spacing:0.04em;text-transform:uppercase;font-size:14px;
     border:none;border-radius:3px;padding:13px 20px;cursor:pointer;width:100%;}
-  .btn-start{background:var(--blaze-blue);color:#fff;}
+  .btn-start{background:var(--trail-green);color:#fff;}
   .btn-stop{background:var(--rust);color:#fff;}
   .btn-primary{background:var(--ink);color:var(--parchment);}
   .btn-ghost{background:transparent;border:1.5px solid var(--ink-dim);color:var(--ink);}
+  .btn-daycare{background:var(--blaze-yellow);color:var(--ink);}
+  .btn-boarding{background:var(--blaze-blue);color:#fff;}
   button:disabled{opacity:0.4;cursor:not-allowed;}
 
   .field{margin-bottom:12px;}
@@ -107,6 +110,9 @@
   .walk-date{font-size:11px;color:var(--ink-dim);text-transform:uppercase;letter-spacing:0.05em;white-space:nowrap;}
   .walk-tags{display:flex;gap:6px;flex-wrap:wrap;}
   .tag{font-size:11px;font-weight:600;padding:3px 9px;border-radius:12px;color:#fff;}
+  .tag-walk{background:#cfe3d4;color:#2f4d38;}
+  .tag-daycare{background:#e2d9f3;color:#4a3a70;}
+  .tag-boarding{background:#cfe0ea;color:#2c4a5c;}
   .walk-quick-stats{display:flex;gap:14px;font-family:'JetBrains Mono',monospace;font-size:13px;font-weight:700;color:var(--ink);white-space:nowrap;}
   .chevron{font-size:11px;color:var(--ink-dim);transition:transform .18s ease;flex-shrink:0;}
   .chevron.open{transform:rotate(180deg);}
@@ -144,7 +150,7 @@
   .invoice-total-row span:last-child{font-family:'JetBrains Mono',monospace;font-size:22px;}
   .select-all-row{padding:12px 16px;display:flex;align-items:center;gap:10px;}
   .select-all-row label{font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--parchment);cursor:pointer;}
-  .walk-stats{display:flex;gap:18px;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;margin-top:14px;}
+  .walk-stats{display:flex;gap:18px;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;margin-top:14px;color:var(--ink);}
   .walk-stats span{display:block;font-family:'Inter',sans-serif;font-weight:400;font-size:10px;color:var(--ink-dim);text-transform:uppercase;}
   .note{font-size:13px;color:var(--ink-dim);margin-top:6px;font-style:italic;}
   .filter-row{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;}
@@ -163,6 +169,11 @@
 
   .row2{display:flex;gap:10px;}
   .row2 > *{flex:1;}
+  .row3{display:flex;gap:8px;}
+  .row3 > *{flex:1;padding:13px 6px;font-size:12px;}
+  .btn-discard{background:#f5d3ca;color:#8a2e15;}
+  .btn-resume{background:#faedb8;color:#6b5220;}
+  .btn-save{background:#cfe3d4;color:#2f4d38;}
 
   /* Map */
   .map-box{
@@ -213,13 +224,13 @@
 <script>
 const COLORS = ['#e8b23e','#3e7ca6','#c1502e','#6b8e4e','#8c5fa3','#4e8c82','#b06b3e','#4e6ab0'];
 
-let state = { dogs: [], walks: [] };
+let state = { dogs: [], walks: [], daycare: [], boarding: [] };
 let activeTab = 'track';
 let timerRunning = false;
 let timerStart = null;
 let timerInterval = null;
 let elapsedMs = 0;
-let walkStopped = false;
+let reviewing = false; // showing the review screen — tracking keeps running until Save/Discard
 let selectedDogIds = [];
 let historyFilter = 'all';
 let expandedWalks = new Set();
@@ -233,6 +244,10 @@ let poopCount = 0;
 let draftDistance = '';
 let draftDistanceIsAuto = true;
 let draftNote = '';
+let daycareExpanded = false;
+let daycareAction = null; // 'checkin' | 'checkout'
+let boardingExpanded = false;
+let boardingAction = null; // 'checkin' | 'checkout'
 
 function adjustCount(which, delta){
   if(which==='pee') peeCount = Math.max(0, peeCount+delta);
@@ -273,9 +288,8 @@ function wireCounters(container){
 // GPS tracking state
 let geoWatchId = null;
 let currentRoute = [];       // [{lat,lng}] recorded during the active walk
-let lastSavedRoute = [];     // route attached to the walk just stopped, for the save screen
+let lastSavedRoute = [];     // route captured when tracking is finalized (save/discard)
 let geoStatus = 'idle';      // idle | locating | tracking | denied | unavailable
-let routeSnapStatus = 'idle'; // idle | snapping | done | failed
 let liveMap = null, livePolyline = null, liveMarker = null;
 
 function haversine(a, b){
@@ -291,15 +305,14 @@ function routeDistanceMiles(route){
   return meters / 1609.34;
 }
 
-// Snap a recorded GPS trace onto the actual street/path network so it
-// doesn't cut straight lines across gaps caused by weak GPS signal.
-// Uses OpenStreetMap Germany's free public OSRM "foot" map-matching service.
-async function attemptRouteSnap(){
-  if(lastSavedRoute.length < 2) return;
-  routeSnapStatus = 'snapping';
-  if(walkStopped && activeTab==='track') render();
+// Snap a saved walk's recorded GPS trace onto the actual street/path network,
+// so it doesn't cut straight lines across gaps caused by weak GPS signal.
+// Runs after the walk is already saved, and updates that record in place
+// once the (free, best-effort) map-matching service responds.
+async function attemptRouteSnapForWalk(walkId, route){
+  if(!route || route.length < 2) return;
   try{
-    let pts = lastSavedRoute;
+    let pts = route;
     if(pts.length > 100){
       const step = Math.ceil(pts.length/100);
       pts = pts.filter((_,i)=> i%step===0 || i===pts.length-1);
@@ -316,16 +329,16 @@ async function attemptRouteSnap(){
       m.geometry.coordinates.forEach(([lng,lat])=> snapped.push({lat,lng}));
     });
     if(snapped.length > 1){
-      lastSavedRoute = snapped;
-      routeSnapStatus = 'done';
-    } else {
-      routeSnapStatus = 'failed';
+      const w = state.walks.find(w=>w.id===walkId);
+      if(w){
+        w.route = snapped;
+        await saveWalks();
+        if(activeTab==='history') render();
+      }
     }
   }catch(e){
-    console.warn('route snap failed', e);
-    routeSnapStatus = 'failed';
+    console.warn('route snap failed, keeping raw GPS path', e);
   }
-  if(walkStopped && activeTab==='track') render();
 }
 
 // Screen Wake Lock — prevents the display from sleeping while a walk is
@@ -431,7 +444,6 @@ function renderRoutePreview(route){
 }
 
 // Real tiled maps (with street names) for saved routes
-let savedRouteMap = null;
 let historyMaps = [];
 
 function initRouteMap(elId, route, opts={}){
@@ -466,6 +478,14 @@ async function loadState(){
     const w = localStorage.getItem('pack-trail-walks');
     state.walks = w ? JSON.parse(w) : [];
   }catch(e){ state.walks = []; }
+  try{
+    const c = localStorage.getItem('pack-trail-daycare');
+    state.daycare = c ? JSON.parse(c) : [];
+  }catch(e){ state.daycare = []; }
+  try{
+    const b = localStorage.getItem('pack-trail-boarding');
+    state.boarding = b ? JSON.parse(b) : [];
+  }catch(e){ state.boarding = []; }
   render();
 }
 
@@ -477,6 +497,14 @@ async function saveWalks(){
   try{ localStorage.setItem('pack-trail-walks', JSON.stringify(state.walks)); }
   catch(e){ console.error('save walks failed', e); }
 }
+async function saveDaycare(){
+  try{ localStorage.setItem('pack-trail-daycare', JSON.stringify(state.daycare)); }
+  catch(e){ console.error('save daycare failed', e); }
+}
+async function saveBoarding(){
+  try{ localStorage.setItem('pack-trail-boarding', JSON.stringify(state.boarding)); }
+  catch(e){ console.error('save boarding failed', e); }
+}
 
 function fmtTime(ms){
   const totalSec = Math.floor(ms/1000);
@@ -487,16 +515,26 @@ function fmtTime(ms){
   return h>0 ? `${h}:${pad(m)}:${pad(s)}` : `${pad(m)}:${pad(s)}`;
 }
 
+function fmtLongDuration(ms){
+  const totalMin = Math.floor(ms/60000);
+  const days = Math.floor(totalMin/1440);
+  const hours = Math.floor((totalMin%1440)/60);
+  const mins = totalMin%60;
+  if(days>0) return `${days}d ${hours}h`;
+  if(hours>0) return `${hours}h ${mins}m`;
+  return `${mins}m`;
+}
+
+function fmtDateTime(d){
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'}) + ', ' + d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+}
+
 function dogById(id){ return state.dogs.find(d=>d.id===id); }
 
 function switchTab(tab){
   if(activeTab==='history' && tab!=='history' && historyMaps.length){
     historyMaps.forEach(m=>m.remove());
     historyMaps = [];
-  }
-  if(activeTab==='track' && tab!=='track' && savedRouteMap){
-    savedRouteMap.remove();
-    savedRouteMap = null;
   }
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===tab));
@@ -511,11 +549,92 @@ function toggleDogSelect(id){
   render();
 }
 
+// ---- Daycare check-in / check-out ----
+function getActiveDaycareSession(dogId){
+  return state.daycare.find(s => s.dogIds.includes(dogId) && !s.checkOutAt);
+}
+
+function openDaycarePrompt(){
+  if(selectedDogIds.length===0) return;
+  boardingExpanded = false;
+  boardingAction = null;
+  const allIn = selectedDogIds.every(id => !!getActiveDaycareSession(id));
+  daycareAction = allIn ? 'checkout' : 'checkin';
+  daycareExpanded = true;
+  render();
+}
+
+function cancelDaycarePrompt(){
+  daycareExpanded = false;
+  daycareAction = null;
+  render();
+}
+
+async function confirmDaycareAction(){
+  const now = new Date().toISOString();
+  if(daycareAction === 'checkin'){
+    selectedDogIds.forEach(id=>{
+      if(!getActiveDaycareSession(id)){
+        state.daycare.unshift({ id:'dc_'+Date.now()+'_'+id, dogIds:[id], checkInAt: now, checkOutAt: null });
+      }
+    });
+  } else if(daycareAction === 'checkout'){
+    selectedDogIds.forEach(id=>{
+      const sess = getActiveDaycareSession(id);
+      if(sess) sess.checkOutAt = now;
+    });
+  }
+  await saveDaycare();
+  daycareExpanded = false;
+  daycareAction = null;
+  render();
+}
+
+// ---- Boarding check-in / check-out ----
+function getActiveBoardingSession(dogId){
+  return state.boarding.find(s => s.dogIds.includes(dogId) && !s.checkOutAt);
+}
+
+function openBoardingPrompt(){
+  if(selectedDogIds.length===0) return;
+  daycareExpanded = false;
+  daycareAction = null;
+  const allIn = selectedDogIds.every(id => !!getActiveBoardingSession(id));
+  boardingAction = allIn ? 'checkout' : 'checkin';
+  boardingExpanded = true;
+  render();
+}
+
+function cancelBoardingPrompt(){
+  boardingExpanded = false;
+  boardingAction = null;
+  render();
+}
+
+async function confirmBoardingAction(){
+  const now = new Date().toISOString();
+  if(boardingAction === 'checkin'){
+    selectedDogIds.forEach(id=>{
+      if(!getActiveBoardingSession(id)){
+        state.boarding.unshift({ id:'bd_'+Date.now()+'_'+id, dogIds:[id], checkInAt: now, checkOutAt: null });
+      }
+    });
+  } else if(boardingAction === 'checkout'){
+    selectedDogIds.forEach(id=>{
+      const sess = getActiveBoardingSession(id);
+      if(sess) sess.checkOutAt = now;
+    });
+  }
+  await saveBoarding();
+  boardingExpanded = false;
+  boardingAction = null;
+  render();
+}
+
 function startTimer(){
   if(selectedDogIds.length===0) return;
   timerRunning = true;
-  walkStopped = false;
-  routeSnapStatus = 'idle';
+  reviewing = false;
   timerStart = Date.now() - elapsedMs;
   timerInterval = setInterval(()=>{
     elapsedMs = Date.now() - timerStart;
@@ -527,23 +646,34 @@ function startTimer(){
   render();
 }
 
-function stopTimer(){
+// "Stop walk" just opens the review screen — timer, GPS, and the wake lock
+// all keep running in the background so nothing is lost if this was an
+// accidental tap. Tracking only truly ends at Discard or Save.
+function enterReview(){
+  reviewing = true;
+  render();
+}
+
+function resumeWalk(){
+  reviewing = false;
+  render();
+}
+
+// Actually stops the timer/GPS/wake lock. Only called from Discard or Save.
+function finalizeTracking(){
   timerRunning = false;
   clearInterval(timerInterval);
-  stopGeoTracking();
+  stopGeoTracking(); // captures currentRoute into lastSavedRoute
   releaseWakeLock();
-  walkStopped = true;
-  render();
-  attemptRouteSnap();
 }
 
 function discardWalk(){
+  finalizeTracking();
   elapsedMs = 0;
   selectedDogIds = [];
   lastSavedRoute = [];
   geoStatus = 'idle';
-  routeSnapStatus = 'idle';
-  walkStopped = false;
+  reviewing = false;
   peeCount = 0;
   poopCount = 0;
   draftDistance = '';
@@ -553,6 +683,7 @@ function discardWalk(){
 }
 
 async function saveWalk(distance, note){
+  finalizeTracking();
   const walk = {
     id: 'w_'+Date.now(),
     dogIds: [...selectedDogIds],
@@ -566,12 +697,12 @@ async function saveWalk(distance, note){
   };
   state.walks.unshift(walk);
   await saveWalks();
+  if(walk.route) attemptRouteSnapForWalk(walk.id, walk.route);
   elapsedMs = 0;
   selectedDogIds = [];
   lastSavedRoute = [];
   geoStatus = 'idle';
-  routeSnapStatus = 'idle';
-  walkStopped = false;
+  reviewing = false;
   peeCount = 0;
   poopCount = 0;
   draftDistance = '';
@@ -594,21 +725,32 @@ async function removeDog(id){
 }
 
 function renderTrack(container){
-  const justStopped = walkStopped;
   const noDogs = state.dogs.length===0;
-  let html = `<div class="card">`;
+  let html = '';
   if(noDogs){
-    html += `<div class="empty"><div class="empty-title">No dogs yet</div>Add a dog on the Dogs tab before you start a walk.</div>`;
-  } else if(justStopped){
-    const gpsDist = lastSavedRoute.length>1 ? routeDistanceMiles(lastSavedRoute).toFixed(2) : '';
+    html += `<div class="card"><div class="empty"><div class="empty-title">No dogs yet</div>Add a dog on the Dogs tab before you start a walk.</div></div>`;
+  } else if(reviewing){
+    const gpsDist = currentRoute.length>1 ? routeDistanceMiles(currentRoute).toFixed(2) : '';
     if(draftDistanceIsAuto && gpsDist) draftDistance = gpsDist;
     else if(draftDistance === '' && gpsDist) draftDistance = gpsDist;
-    html += `
-      <h3 style="margin-bottom:10px;color:var(--ink);">Walk complete</h3>
-      <div class="timer-display" style="padding:4px 0 14px;">${fmtTime(elapsedMs)}</div>
-      ${lastSavedRoute.length>1 ? '<div class="map-box large" id="savedRouteMap"></div>' : ''}
-      ${routeSnapStatus==='snapping' ? '<div class="geo-status">Snapping route to roads…</div>' : ''}
-      ${routeSnapStatus==='failed' ? '<div class="geo-status">Couldn\'t snap to roads — showing recorded GPS path.</div>' : ''}
+    html += `<div class="card">
+      <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Who's being cared for?</label>
+      <div class="dog-picker">`;
+    state.dogs.forEach(d=>{
+      const sel = selectedDogIds.includes(d.id);
+      html += `<div class="chip ${sel?'selected':''}" style="background:${sel? d.color:'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}">${d.name}</div>`;
+    });
+    html += `</div>
+    </div>`;
+
+    html += `<div class="card">
+      <h3 style="margin-bottom:6px;color:var(--ink);">Reviewing walk</h3>
+      <div class="timer-sub" style="margin-bottom:10px;">timer's still running — nothing's saved yet</div>
+      <div class="timer-display" id="timerDisplay">${fmtTime(elapsedMs)}</div>
+      <div class="map-box" id="liveMap"></div>
+      ${geoStatus==='denied' ? '<div class="geo-status warn">Location access was denied — you can still enter distance manually.</div>' :
+        geoStatus==='unavailable' ? '<div class="geo-status warn">Location isn\'t available here — you can still enter distance manually.</div>' :
+        `<div class="geo-status" id="geoStatusText">${geoStatus==='locating' ? 'Finding your location…' : `Tracking · ${routeDistanceMiles(currentRoute).toFixed(2)} mi so far`}</div>`}
       <div class="field" style="margin-top:14px;">
         <label>Distance (miles${gpsDist? ', from GPS — edit if needed':', optional'})</label>
         <input type="number" step="0.1" id="distInput" placeholder="e.g. 1.2" value="${draftDistance}">
@@ -618,18 +760,24 @@ function renderTrack(container){
         <label>Note (optional)</label>
         <textarea id="noteInput" placeholder="Sniffed every tree on Maple St.">${draftNote}</textarea>
       </div>
-      <div class="row2">
-        <button class="btn-ghost" id="discardBtn">Discard</button>
-        <button class="btn-primary" id="saveWalkBtn">Save walk</button>
-      </div>`;
+      <div class="row3">
+        <button class="btn-discard" id="discardBtn">Discard</button>
+        <button class="btn-resume" id="resumeBtn">Resume walk</button>
+        <button class="btn-save" id="saveWalkBtn">Save walk</button>
+      </div>
+    </div>`;
   } else {
-    html += `<label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Who's on this walk?</label>
+    html += `<div class="card">
+      <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Who's being cared for?</label>
       <div class="dog-picker">`;
     state.dogs.forEach(d=>{
       const sel = selectedDogIds.includes(d.id);
       html += `<div class="chip ${sel?'selected':''}" style="background:${sel? d.color:'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-id="${d.id}">${d.name}</div>`;
     });
     html += `</div>
+    </div>`;
+
+    html += `<div class="card">
       <div class="timer-display" id="timerDisplay">${fmtTime(elapsedMs)}</div>
       <div class="timer-sub">${timerRunning ? 'walk in progress' : (selectedDogIds.length? 'ready when you are' : 'pick at least one dog')}</div>`;
     if(timerRunning){
@@ -652,23 +800,56 @@ function renderTrack(container){
     } else {
       html += `<button class="btn-stop" id="stopBtn">Stop walk</button>`;
     }
+    html += `</div>`;
+
+    html += `<div class="card">`;
+    if(daycareExpanded){
+      const verb = daycareAction==='checkout' ? 'Check out' : 'Check in';
+      html += `<h3 style="margin-bottom:10px;color:var(--ink);">${verb} — Daycare</h3>
+        <div class="walk-tags" style="margin-bottom:16px;">`;
+      selectedDogIds.forEach(id=>{
+        const dog = dogById(id);
+        if(dog) html += `<span class="tag" style="background:${dog.color}">${dog.name}</span>`;
+      });
+      html += `</div>
+        <div class="row2">
+          <button class="btn-ghost" id="daycareCancelBtn">Cancel</button>
+          <button class="btn-daycare" id="daycareConfirmBtn">${verb}</button>
+        </div>`;
+    } else if(boardingExpanded){
+      const verb = boardingAction==='checkout' ? 'Check out' : 'Check in';
+      html += `<h3 style="margin-bottom:10px;color:var(--ink);">${verb} — Boarding</h3>
+        <div class="walk-tags" style="margin-bottom:16px;">`;
+      selectedDogIds.forEach(id=>{
+        const dog = dogById(id);
+        if(dog) html += `<span class="tag" style="background:${dog.color}">${dog.name}</span>`;
+      });
+      html += `</div>
+        <div class="row2">
+          <button class="btn-ghost" id="boardingCancelBtn">Cancel</button>
+          <button class="btn-boarding" id="boardingConfirmBtn">${verb}</button>
+        </div>`;
+    } else {
+      html += `<div class="row2">
+        <button class="btn-daycare" id="daycareBtn" ${selectedDogIds.length===0?'disabled':''}>Daycare</button>
+        <button class="btn-boarding" id="boardingBtn" ${selectedDogIds.length===0?'disabled':''}>Boarding</button>
+      </div>`;
+    }
+    html += `</div>`;
   }
-  html += `</div>`;
   container.innerHTML = html;
 
   if(timerRunning && geoStatus!=='denied' && geoStatus!=='unavailable'){
     initLiveMap();
-  }
-  if(savedRouteMap){ savedRouteMap.remove(); savedRouteMap = null; }
-  if(justStopped && lastSavedRoute.length>1){
-    savedRouteMap = initRouteMap('savedRouteMap', lastSavedRoute, {interactive:true});
   }
 
   container.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{ if(!timerRunning) toggleDogSelect(c.dataset.id); }));
   const startBtn = container.querySelector('#startBtn');
   if(startBtn) startBtn.addEventListener('click', startTimer);
   const stopBtn = container.querySelector('#stopBtn');
-  if(stopBtn) stopBtn.addEventListener('click', stopTimer);
+  if(stopBtn) stopBtn.addEventListener('click', enterReview);
+  const resumeBtn = container.querySelector('#resumeBtn');
+  if(resumeBtn) resumeBtn.addEventListener('click', resumeWalk);
   const discardBtn = container.querySelector('#discardBtn');
   if(discardBtn) discardBtn.addEventListener('click', discardWalk);
   const saveBtn = container.querySelector('#saveWalkBtn');
@@ -682,6 +863,19 @@ function renderTrack(container){
   const noteInput = container.querySelector('#noteInput');
   if(noteInput) noteInput.addEventListener('input', e=>draftNote=e.target.value);
   wireCounters(container);
+
+  const daycareBtn = container.querySelector('#daycareBtn');
+  if(daycareBtn) daycareBtn.addEventListener('click', openDaycarePrompt);
+  const boardingBtn = container.querySelector('#boardingBtn');
+  if(boardingBtn) boardingBtn.addEventListener('click', openBoardingPrompt);
+  const daycareCancelBtn = container.querySelector('#daycareCancelBtn');
+  if(daycareCancelBtn) daycareCancelBtn.addEventListener('click', cancelDaycarePrompt);
+  const daycareConfirmBtn = container.querySelector('#daycareConfirmBtn');
+  if(daycareConfirmBtn) daycareConfirmBtn.addEventListener('click', confirmDaycareAction);
+  const boardingCancelBtn = container.querySelector('#boardingCancelBtn');
+  if(boardingCancelBtn) boardingCancelBtn.addEventListener('click', cancelBoardingPrompt);
+  const boardingConfirmBtn = container.querySelector('#boardingConfirmBtn');
+  if(boardingConfirmBtn) boardingConfirmBtn.addEventListener('click', confirmBoardingAction);
 }
 
 function renderDogs(container){
@@ -733,6 +927,20 @@ async function deleteWalk(id){
   expandedWalks.delete(id);
   if(editingWalkId===id) editingWalkId = null;
   await saveWalks();
+  render();
+}
+
+async function deleteDaycare(id){
+  if(!confirm("Delete this daycare record? This can't be undone.")) return;
+  state.daycare = state.daycare.filter(s=>s.id!==id);
+  await saveDaycare();
+  render();
+}
+
+async function deleteBoarding(id){
+  if(!confirm("Delete this boarding record? This can't be undone.")) return;
+  state.boarding = state.boarding.filter(s=>s.id!==id);
+  await saveBoarding();
   render();
 }
 
@@ -1066,6 +1274,210 @@ async function shareWalk(w){
   }
 }
 
+async function buildDaycareSnapshot(s){
+  try{ await document.fonts.ready; }catch(e){}
+  const W = 640, padding = 32, contentW = W - padding*2;
+
+  const dog = dogById(s.dogIds[0]);
+  const dogName = dog ? dog.name : '(removed dog)';
+  const dogColor = dog ? dog.color : '#6a634c';
+  const inTime = new Date(s.checkInAt);
+  const dateStr = inTime.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'});
+
+  const H = padding + 34 + 40 + 44 + 60 + padding;
+  const scale = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = W*scale; canvas.height = H*scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = '#ece4cc';
+  roundRectPath(ctx,0,0,W,H,0); ctx.fill();
+
+  let y = padding;
+  ctx.fillStyle = '#6a634c';
+  ctx.font = '600 13px Inter, sans-serif';
+  ctx.fillText('🐾 PACKTRAX', padding, y);
+  y += 34;
+
+  ctx.fillStyle = '#211f14';
+  ctx.font = '600 22px Oswald, sans-serif';
+  ctx.fillText(dateStr, padding, y);
+  y += 40;
+
+  let tx = padding;
+  ctx.font = '700 14px Inter, sans-serif';
+  const nameW = ctx.measureText(dogName).width + 24;
+  ctx.fillStyle = dogColor;
+  roundRectPath(ctx, tx, y, nameW, 28, 14); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(dogName, tx+12, y+7);
+  tx += nameW + 8;
+  const typeW = ctx.measureText('Daycare').width + 24;
+  ctx.fillStyle = '#e2d9f3';
+  roundRectPath(ctx, tx, y, typeW, 28, 14); ctx.fill();
+  ctx.fillStyle = '#4a3a70';
+  ctx.fillText('Daycare', tx+12, y+7);
+  y += 44;
+
+  ctx.font = '700 20px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#211f14';
+  ctx.fillText(inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}), padding, y);
+  ctx.font = '400 11px Inter, sans-serif';
+  ctx.fillStyle = '#6a634c';
+  ctx.fillText('CHECK-IN', padding, y+28);
+
+  if(s.checkOutAt){
+    const outTime = new Date(s.checkOutAt);
+    ctx.font = '700 20px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#211f14';
+    ctx.fillText(outTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}), padding+190, y);
+    ctx.font = '400 11px Inter, sans-serif';
+    ctx.fillStyle = '#6a634c';
+    ctx.fillText('CHECK-OUT', padding+190, y+28);
+
+    ctx.font = '700 20px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#211f14';
+    ctx.fillText(fmtTime(outTime-inTime), padding+380, y);
+    ctx.font = '400 11px Inter, sans-serif';
+    ctx.fillStyle = '#6a634c';
+    ctx.fillText('DURATION', padding+380, y+28);
+  } else {
+    ctx.font = '700 16px Inter, sans-serif';
+    ctx.fillStyle = '#3e7ca6';
+    ctx.fillText('● Currently checked in', padding+190, y+2);
+  }
+
+  return new Promise(resolve => canvas.toBlob(blob=>resolve(blob), 'image/png'));
+}
+
+async function shareDaycare(s){
+  try{
+    const blob = await buildDaycareSnapshot(s);
+    if(!blob) return;
+    const dog = dogById(s.dogIds[0]);
+    const dogName = dog ? dog.name : 'a dog';
+    const inTime = new Date(s.checkInAt);
+    const file = new File([blob], 'daycare.png', {type:'image/png'});
+    const text = s.checkOutAt
+      ? `${dogName} daycare — ${fmtTime(new Date(s.checkOutAt)-inTime)}`
+      : `${dogName} checked into daycare at ${inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})}`;
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({ files:[file], title:'PackTrax daycare', text });
+    } else if(navigator.share){
+      try{ await navigator.share({ title:'PackTrax daycare', text }); }
+      catch(e){ downloadBlob(blob, 'daycare.png'); }
+    } else {
+      downloadBlob(blob, 'daycare.png');
+    }
+  }catch(e){
+    if(e.name !== 'AbortError') console.error('daycare share failed', e);
+  }
+}
+
+async function buildBoardingSnapshot(s){
+  try{ await document.fonts.ready; }catch(e){}
+  const W = 640, padding = 32;
+
+  const dog = dogById(s.dogIds[0]);
+  const dogName = dog ? dog.name : '(removed dog)';
+  const dogColor = dog ? dog.color : '#6a634c';
+  const inTime = new Date(s.checkInAt);
+  const dateStr = inTime.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'});
+
+  const H = padding + 34 + 40 + 44 + 60 + padding;
+  const scale = 2;
+  const canvas = document.createElement('canvas');
+  canvas.width = W*scale; canvas.height = H*scale;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(scale, scale);
+  ctx.textBaseline = 'top';
+
+  ctx.fillStyle = '#ece4cc';
+  roundRectPath(ctx,0,0,W,H,0); ctx.fill();
+
+  let y = padding;
+  ctx.fillStyle = '#6a634c';
+  ctx.font = '600 13px Inter, sans-serif';
+  ctx.fillText('🐾 PACKTRAX', padding, y);
+  y += 34;
+
+  ctx.fillStyle = '#211f14';
+  ctx.font = '600 22px Oswald, sans-serif';
+  ctx.fillText(dateStr, padding, y);
+  y += 40;
+
+  let tx = padding;
+  ctx.font = '700 14px Inter, sans-serif';
+  const nameW = ctx.measureText(dogName).width + 24;
+  ctx.fillStyle = dogColor;
+  roundRectPath(ctx, tx, y, nameW, 28, 14); ctx.fill();
+  ctx.fillStyle = '#fff';
+  ctx.fillText(dogName, tx+12, y+7);
+  tx += nameW + 8;
+  const typeW = ctx.measureText('Boarding').width + 24;
+  ctx.fillStyle = '#cfe0ea';
+  roundRectPath(ctx, tx, y, typeW, 28, 14); ctx.fill();
+  ctx.fillStyle = '#2c4a5c';
+  ctx.fillText('Boarding', tx+12, y+7);
+  y += 44;
+
+  ctx.font = '700 15px "JetBrains Mono", monospace';
+  ctx.fillStyle = '#211f14';
+  ctx.fillText(fmtDateTime(inTime), padding, y);
+  ctx.font = '400 11px Inter, sans-serif';
+  ctx.fillStyle = '#6a634c';
+  ctx.fillText('CHECK-IN', padding, y+26);
+
+  if(s.checkOutAt){
+    const outTime = new Date(s.checkOutAt);
+    ctx.font = '700 15px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#211f14';
+    ctx.fillText(fmtDateTime(outTime), padding, y+50);
+    ctx.font = '400 11px Inter, sans-serif';
+    ctx.fillStyle = '#6a634c';
+    ctx.fillText('CHECK-OUT', padding, y+76);
+
+    ctx.font = '700 20px "JetBrains Mono", monospace';
+    ctx.fillStyle = '#211f14';
+    ctx.fillText(fmtLongDuration(outTime-inTime), padding+380, y);
+    ctx.font = '400 11px Inter, sans-serif';
+    ctx.fillStyle = '#6a634c';
+    ctx.fillText('DURATION', padding+380, y+28);
+  } else {
+    ctx.font = '700 16px Inter, sans-serif';
+    ctx.fillStyle = '#3e7ca6';
+    ctx.fillText('● Currently checked in', padding+380, y+2);
+  }
+
+  return new Promise(resolve => canvas.toBlob(blob=>resolve(blob), 'image/png'));
+}
+
+async function shareBoarding(s){
+  try{
+    const blob = await buildBoardingSnapshot(s);
+    if(!blob) return;
+    const dog = dogById(s.dogIds[0]);
+    const dogName = dog ? dog.name : 'a dog';
+    const inTime = new Date(s.checkInAt);
+    const file = new File([blob], 'boarding.png', {type:'image/png'});
+    const text = s.checkOutAt
+      ? `${dogName} boarding — ${fmtLongDuration(new Date(s.checkOutAt)-inTime)}`
+      : `${dogName} checked into boarding at ${fmtDateTime(inTime)}`;
+    if(navigator.canShare && navigator.canShare({files:[file]})){
+      await navigator.share({ files:[file], title:'PackTrax boarding', text });
+    } else if(navigator.share){
+      try{ await navigator.share({ title:'PackTrax boarding', text }); }
+      catch(e){ downloadBlob(blob, 'boarding.png'); }
+    } else {
+      downloadBlob(blob, 'boarding.png');
+    }
+  }catch(e){
+    if(e.name !== 'AbortError') console.error('boarding share failed', e);
+  }
+}
+
 // ---- Invoice ----
 function toggleInvoiceSelect(id){
   if(invoiceSelection.has(id)) invoiceSelection.delete(id);
@@ -1320,15 +1732,103 @@ function renderHistory(container){
   html += `</div>`;
 
   const walks = state.walks.filter(w => historyFilter==='all' || w.dogIds.includes(historyFilter));
+  const daycareItems = state.daycare.filter(s => historyFilter==='all' || s.dogIds.includes(historyFilter));
+  const boardingItems = state.boarding.filter(s => historyFilter==='all' || s.dogIds.includes(historyFilter));
+  const combined = [
+    ...walks.map(w => ({ type:'walk', sortDate:w.date, data:w })),
+    ...daycareItems.map(s => ({ type:'daycare', sortDate:s.checkInAt, data:s })),
+    ...boardingItems.map(s => ({ type:'boarding', sortDate:s.checkInAt, data:s }))
+  ].sort((a,b)=> new Date(b.sortDate) - new Date(a.sortDate));
 
-  if(walks.length===0){
-    html += `<div class="empty"><div class="empty-title">No walks yet</div>Log a walk from the Track tab and it'll show up here.</div>`;
+  if(combined.length===0){
+    html += `<div class="empty"><div class="empty-title">Nothing here yet</div>Log a walk, daycare visit, or boarding stay from the Track tab and it'll show up here.</div>`;
     container.innerHTML = html;
     container.querySelectorAll('[data-filter]').forEach(c=>c.addEventListener('click', ()=>{ historyFilter=c.dataset.filter; render(); }));
     return;
   }
 
-  walks.forEach(w=>{
+  combined.forEach(item=>{
+    if(item.type==='daycare'){
+      const s = item.data;
+      const dog = dogById(s.dogIds[0]);
+      const dogName = dog ? dog.name : '(removed dog)';
+      const dogColor = dog ? dog.color : 'var(--ink-dim)';
+      const inTime = new Date(s.checkInAt);
+      const inDateStr = inTime.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' + inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+      const isOpen = expandedWalks.has(s.id);
+      html += `<div class="walk-card">
+        <div class="walk-card-header" data-toggle="${s.id}">
+          <span class="paw-icon">🏠</span>
+          <div class="walk-summary">
+            <div class="walk-top">
+              <div class="walk-date">${inDateStr}</div>
+              <div class="walk-quick-stats">${s.checkOutAt ? '<span>Checked out</span>' : '<span style="color:var(--blaze-blue);">● Checked in</span>'}</div>
+            </div>
+            <div class="walk-tags">
+              <span class="tag" style="background:${dogColor}">${dogName}</span>
+              <span class="tag tag-daycare">Daycare</span>
+            </div>
+          </div>
+          <div class="card-actions">
+            <button class="icon-btn" data-share-daycare="${s.id}" title="Share">📤</button>
+            <button class="icon-btn danger" data-delete-daycare="${s.id}" title="Delete">🗑️</button>
+          </div>
+          <span class="chevron ${isOpen?'open':''}">▼</span>
+        </div>`;
+      if(isOpen){
+        html += `<div class="walk-card-body">
+          <div class="walk-stats">
+            <div>${inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})}<span>Check-in</span></div>
+            <div>${s.checkOutAt ? new Date(s.checkOutAt).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}) : '—'}<span>Check-out</span></div>
+            <div>${s.checkOutAt ? fmtTime(new Date(s.checkOutAt)-inTime) : '—'}<span>Duration</span></div>
+          </div>
+        </div>`;
+      }
+      html += `</div>`;
+      return;
+    }
+
+    if(item.type==='boarding'){
+      const s = item.data;
+      const dog = dogById(s.dogIds[0]);
+      const dogName = dog ? dog.name : '(removed dog)';
+      const dogColor = dog ? dog.color : 'var(--ink-dim)';
+      const inTime = new Date(s.checkInAt);
+      const inDateStr = inTime.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' + inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+      const isOpen = expandedWalks.has(s.id);
+      html += `<div class="walk-card">
+        <div class="walk-card-header" data-toggle="${s.id}">
+          <span class="paw-icon">🧳</span>
+          <div class="walk-summary">
+            <div class="walk-top">
+              <div class="walk-date">${inDateStr}</div>
+              <div class="walk-quick-stats">${s.checkOutAt ? '<span>Checked out</span>' : '<span style="color:var(--blaze-blue);">● Checked in</span>'}</div>
+            </div>
+            <div class="walk-tags">
+              <span class="tag" style="background:${dogColor}">${dogName}</span>
+              <span class="tag tag-boarding">Boarding</span>
+            </div>
+          </div>
+          <div class="card-actions">
+            <button class="icon-btn" data-share-boarding="${s.id}" title="Share">📤</button>
+            <button class="icon-btn danger" data-delete-boarding="${s.id}" title="Delete">🗑️</button>
+          </div>
+          <span class="chevron ${isOpen?'open':''}">▼</span>
+        </div>`;
+      if(isOpen){
+        html += `<div class="walk-card-body">
+          <div class="walk-stats">
+            <div>${fmtDateTime(inTime)}<span>Check-in</span></div>
+            <div>${s.checkOutAt ? fmtDateTime(new Date(s.checkOutAt)) : '—'}<span>Check-out</span></div>
+            <div>${s.checkOutAt ? fmtLongDuration(new Date(s.checkOutAt)-inTime) : '—'}<span>Duration</span></div>
+          </div>
+        </div>`;
+      }
+      html += `</div>`;
+      return;
+    }
+
+    const w = item.data;
     const d = new Date(w.date);
     const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' + d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
     const isOpen = expandedWalks.has(w.id);
@@ -1350,6 +1850,7 @@ function renderHistory(container){
       if(dog) html += `<span class="tag" style="background:${dog.color}">${dog.name}</span>`;
       else html += `<span class="tag" style="background:var(--ink-dim)">(removed dog)</span>`;
     });
+    html += `<span class="tag tag-walk">Walk</span>`;
     html += `</div>
         </div>
         <div class="card-actions">
@@ -1400,6 +1901,24 @@ function renderHistory(container){
   container.querySelectorAll('[data-delete]').forEach(b=>b.addEventListener('click', e=>{
     e.stopPropagation();
     deleteWalk(b.dataset.delete);
+  }));
+  container.querySelectorAll('[data-delete-daycare]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    deleteDaycare(b.dataset.deleteDaycare);
+  }));
+  container.querySelectorAll('[data-share-daycare]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const s = state.daycare.find(s=>s.id===b.dataset.shareDaycare);
+    if(s) shareDaycare(s);
+  }));
+  container.querySelectorAll('[data-delete-boarding]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    deleteBoarding(b.dataset.deleteBoarding);
+  }));
+  container.querySelectorAll('[data-share-boarding]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const s = state.boarding.find(s=>s.id===b.dataset.shareBoarding);
+    if(s) shareBoarding(s);
   }));
   container.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click', e=>{
     e.stopPropagation();
