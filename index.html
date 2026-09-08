@@ -83,7 +83,7 @@
 
   .field{margin-bottom:12px;}
   .field label{display:block;font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);margin-bottom:5px;}
-  .field input, .field textarea{
+  .field input, .field textarea, .field select{
     width:100%;padding:9px 10px;border:1.5px solid var(--parchment-dim);border-radius:3px;
     font-family:'Inter',sans-serif;font-size:14px;background:#fff;color:var(--ink);
   }
@@ -236,6 +236,7 @@ let historyFilter = 'all';
 let expandedWalks = new Set();
 let editingWalkId = null;
 let editDraft = { pee:0, poop:0, note:'' };
+let editingCareId = null;   // id of daycare/boarding record being time-edited
 let invoiceSelection = new Set();
 let invoiceFilter = 'all';
 let invoicePrices = {};
@@ -248,6 +249,8 @@ let daycareExpanded = false;
 let daycareAction = null; // 'checkin' | 'checkout'
 let boardingExpanded = false;
 let boardingAction = null; // 'checkin' | 'checkout'
+const BOARDING_TYPES = ['Board with me', 'Board at home - Check-ins', 'Board at home - Housesit'];
+let boardingTypeSelection = BOARDING_TYPES[0];
 
 function adjustCount(which, delta){
   if(which==='pee') peeCount = Math.max(0, peeCount+delta);
@@ -601,6 +604,7 @@ function openBoardingPrompt(){
   daycareAction = null;
   const allIn = selectedDogIds.every(id => !!getActiveBoardingSession(id));
   boardingAction = allIn ? 'checkout' : 'checkin';
+  boardingTypeSelection = BOARDING_TYPES[0];
   boardingExpanded = true;
   render();
 }
@@ -616,7 +620,7 @@ async function confirmBoardingAction(){
   if(boardingAction === 'checkin'){
     selectedDogIds.forEach(id=>{
       if(!getActiveBoardingSession(id)){
-        state.boarding.unshift({ id:'bd_'+Date.now()+'_'+id, dogIds:[id], checkInAt: now, checkOutAt: null });
+        state.boarding.unshift({ id:'bd_'+Date.now()+'_'+id, dogIds:[id], checkInAt: now, checkOutAt: null, boardingType: boardingTypeSelection });
       }
     });
   } else if(boardingAction === 'checkout'){
@@ -824,8 +828,16 @@ function renderTrack(container){
         const dog = dogById(id);
         if(dog) html += `<span class="tag" style="background:${dog.color}">${dog.name}</span>`;
       });
-      html += `</div>
-        <div class="row2">
+      html += `</div>`;
+      if(boardingAction==='checkin'){
+        html += `<div class="field">
+          <label>Boarding type</label>
+          <select id="boardingTypeSelect">
+            ${BOARDING_TYPES.map(t=>`<option value="${t}" ${t===boardingTypeSelection?'selected':''}>${t}</option>`).join('')}
+          </select>
+        </div>`;
+      }
+      html += `<div class="row2">
           <button class="btn-ghost" id="boardingCancelBtn">Cancel</button>
           <button class="btn-boarding" id="boardingConfirmBtn">${verb}</button>
         </div>`;
@@ -876,6 +888,8 @@ function renderTrack(container){
   if(boardingCancelBtn) boardingCancelBtn.addEventListener('click', cancelBoardingPrompt);
   const boardingConfirmBtn = container.querySelector('#boardingConfirmBtn');
   if(boardingConfirmBtn) boardingConfirmBtn.addEventListener('click', confirmBoardingAction);
+  const boardingTypeSelect = container.querySelector('#boardingTypeSelect');
+  if(boardingTypeSelect) boardingTypeSelect.addEventListener('change', e=>boardingTypeSelection=e.target.value);
 }
 
 function renderDogs(container){
@@ -941,6 +955,33 @@ async function deleteBoarding(id){
   if(!confirm("Delete this boarding record? This can't be undone.")) return;
   state.boarding = state.boarding.filter(s=>s.id!==id);
   await saveBoarding();
+  render();
+}
+
+// ---- Editing daycare/boarding check-in / check-out times ----
+function toDatetimeLocal(iso){
+  const d = new Date(iso);
+  const pad = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function startEditCare(type, s){
+  editingCareId = s.id;
+  render();
+}
+function cancelEditCare(){
+  editingCareId = null;
+  render();
+}
+async function saveEditCare(type, id, checkInVal, checkOutVal){
+  const list = type==='daycare' ? state.daycare : state.boarding;
+  const s = list.find(x=>x.id===id);
+  if(s){
+    if(checkInVal) s.checkInAt = new Date(checkInVal).toISOString();
+    s.checkOutAt = checkOutVal ? new Date(checkOutVal).toISOString() : null;
+    if(type==='daycare') await saveDaycare(); else await saveBoarding();
+  }
+  editingCareId = null;
   render();
 }
 
@@ -1386,7 +1427,7 @@ async function buildBoardingSnapshot(s){
   const inTime = new Date(s.checkInAt);
   const dateStr = inTime.toLocaleDateString(undefined,{month:'long',day:'numeric',year:'numeric'});
 
-  const H = padding + 34 + 40 + 44 + 60 + padding;
+  const H = padding + 34 + 40 + 44 + (s.boardingType ? 22 : 0) + 90 + padding;
   const scale = 2;
   const canvas = document.createElement('canvas');
   canvas.width = W*scale; canvas.height = H*scale;
@@ -1422,6 +1463,13 @@ async function buildBoardingSnapshot(s){
   ctx.fillStyle = '#2c4a5c';
   ctx.fillText('Boarding', tx+12, y+7);
   y += 44;
+
+  if(s.boardingType){
+    ctx.font = '500 13px Inter, sans-serif';
+    ctx.fillStyle = '#6a634c';
+    ctx.fillText(s.boardingType, padding, y);
+    y += 22;
+  }
 
   ctx.font = '700 15px "JetBrains Mono", monospace';
   ctx.fillStyle = '#211f14';
@@ -1776,13 +1824,29 @@ function renderHistory(container){
           <span class="chevron ${isOpen?'open':''}">▼</span>
         </div>`;
       if(isOpen){
-        html += `<div class="walk-card-body">
-          <div class="walk-stats">
+        html += `<div class="walk-card-body">`;
+        if(editingCareId === s.id){
+          html += `<div class="field" style="margin-top:14px;">
+            <label>Check-in</label>
+            <input type="datetime-local" id="editCareIn_${s.id}" value="${toDatetimeLocal(s.checkInAt)}">
+          </div>
+          <div class="field">
+            <label>Check-out (leave blank if still checked in)</label>
+            <input type="datetime-local" id="editCareOut_${s.id}" value="${s.checkOutAt ? toDatetimeLocal(s.checkOutAt) : ''}">
+          </div>
+          <div class="edit-actions">
+            <button class="btn-ghost" data-cancel-edit-care="1">Cancel</button>
+            <button class="btn-primary" data-save-edit-care="daycare:${s.id}">Save changes</button>
+          </div>`;
+        } else {
+          html += `<div class="walk-stats">
             <div>${inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'})}<span>Check-in</span></div>
             <div>${s.checkOutAt ? new Date(s.checkOutAt).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}) : '—'}<span>Check-out</span></div>
             <div>${s.checkOutAt ? fmtTime(new Date(s.checkOutAt)-inTime) : '—'}<span>Duration</span></div>
           </div>
-        </div>`;
+          <button class="btn-ghost edit-link" data-edit-daycare="${s.id}">✎ Edit times</button>`;
+        }
+        html += `</div>`;
       }
       html += `</div>`;
       return;
@@ -1808,6 +1872,7 @@ function renderHistory(container){
               <span class="tag" style="background:${dogColor}">${dogName}</span>
               <span class="tag tag-boarding">Boarding</span>
             </div>
+            ${s.boardingType ? `<div class="dog-meta" style="margin-top:4px;">${s.boardingType}</div>` : ''}
           </div>
           <div class="card-actions">
             <button class="icon-btn" data-share-boarding="${s.id}" title="Share">📤</button>
@@ -1816,13 +1881,29 @@ function renderHistory(container){
           <span class="chevron ${isOpen?'open':''}">▼</span>
         </div>`;
       if(isOpen){
-        html += `<div class="walk-card-body">
-          <div class="walk-stats">
+        html += `<div class="walk-card-body">`;
+        if(editingCareId === s.id){
+          html += `<div class="field" style="margin-top:14px;">
+            <label>Check-in</label>
+            <input type="datetime-local" id="editCareIn_${s.id}" value="${toDatetimeLocal(s.checkInAt)}">
+          </div>
+          <div class="field">
+            <label>Check-out (leave blank if still checked in)</label>
+            <input type="datetime-local" id="editCareOut_${s.id}" value="${s.checkOutAt ? toDatetimeLocal(s.checkOutAt) : ''}">
+          </div>
+          <div class="edit-actions">
+            <button class="btn-ghost" data-cancel-edit-care="1">Cancel</button>
+            <button class="btn-primary" data-save-edit-care="boarding:${s.id}">Save changes</button>
+          </div>`;
+        } else {
+          html += `<div class="walk-stats">
             <div>${fmtDateTime(inTime)}<span>Check-in</span></div>
             <div>${s.checkOutAt ? fmtDateTime(new Date(s.checkOutAt)) : '—'}<span>Check-out</span></div>
             <div>${s.checkOutAt ? fmtLongDuration(new Date(s.checkOutAt)-inTime) : '—'}<span>Duration</span></div>
           </div>
-        </div>`;
+          <button class="btn-ghost edit-link" data-edit-boarding="${s.id}">✎ Edit times</button>`;
+        }
+        html += `</div>`;
       }
       html += `</div>`;
       return;
@@ -1919,6 +2000,27 @@ function renderHistory(container){
     e.stopPropagation();
     const s = state.boarding.find(s=>s.id===b.dataset.shareBoarding);
     if(s) shareBoarding(s);
+  }));
+  container.querySelectorAll('[data-edit-daycare]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const s = state.daycare.find(s=>s.id===b.dataset.editDaycare);
+    if(s) startEditCare('daycare', s);
+  }));
+  container.querySelectorAll('[data-edit-boarding]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const s = state.boarding.find(s=>s.id===b.dataset.editBoarding);
+    if(s) startEditCare('boarding', s);
+  }));
+  container.querySelectorAll('[data-cancel-edit-care]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    cancelEditCare();
+  }));
+  container.querySelectorAll('[data-save-edit-care]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const [type, id] = b.dataset.saveEditCare.split(':');
+    const inVal = container.querySelector(`#editCareIn_${id}`).value;
+    const outVal = container.querySelector(`#editCareOut_${id}`).value;
+    saveEditCare(type, id, inVal, outVal);
   }));
   container.querySelectorAll('[data-edit]').forEach(b=>b.addEventListener('click', e=>{
     e.stopPropagation();
