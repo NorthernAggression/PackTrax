@@ -236,6 +236,9 @@ let historyFilter = 'all';
 let expandedWalks = new Set();
 let editingWalkId = null;
 let editDraft = { pee:0, poop:0, note:'' };
+let editingRouteId = null;
+let editingRoutePoints = [];
+let editRouteMap = null, editRoutePolyline = null, editRouteMarkers = [];
 let editingCareId = null;   // id of daycare/boarding record being time-edited
 let invoiceSelection = new Set();
 let invoiceFilter = 'all';
@@ -475,6 +478,74 @@ function initRouteMap(elId, route, opts={}){
   return map;
 }
 
+// ---- Manual route point editing ----
+function downsampleRoute(route, maxPoints){
+  if(route.length <= maxPoints) return route.map(p=>({...p}));
+  const step = (route.length-1) / (maxPoints-1);
+  const out = [];
+  for(let i=0;i<maxPoints;i++){
+    out.push({...route[Math.round(i*step)]});
+  }
+  return out;
+}
+
+function startEditRoute(w){
+  if(!w.route || w.route.length<2) return;
+  editingWalkId = null;
+  editingRouteId = w.id;
+  editingRoutePoints = downsampleRoute(w.route, 40);
+  render();
+}
+
+function cancelEditRoute(){
+  editingRouteId = null;
+  editingRoutePoints = [];
+  if(editRouteMap){ editRouteMap.remove(); editRouteMap = null; }
+  editRouteMarkers = [];
+  render();
+}
+
+async function saveEditRoute(){
+  const w = state.walks.find(w=>w.id===editingRouteId);
+  if(w && editingRoutePoints.length>1){
+    w.route = editingRoutePoints.map(p=>({...p}));
+    w.distance = parseFloat(routeDistanceMiles(w.route).toFixed(2));
+    await saveWalks();
+  }
+  editingRouteId = null;
+  editingRoutePoints = [];
+  if(editRouteMap){ editRouteMap.remove(); editRouteMap = null; }
+  editRouteMarkers = [];
+  render();
+}
+
+function initEditRouteMap(){
+  const el = document.getElementById('editRouteMap');
+  if(!el || typeof L === 'undefined' || editingRoutePoints.length<2) return;
+  if(editRouteMap){ editRouteMap.remove(); editRouteMap = null; }
+  editRouteMarkers = [];
+  editRouteMap = L.map('editRouteMap', { attributionControl:false });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(editRouteMap);
+  const latlngs = editingRoutePoints.map(p=>[p.lat,p.lng]);
+  editRoutePolyline = L.polyline(latlngs, {color:'#c1502e', weight:4}).addTo(editRouteMap);
+  editRouteMap.fitBounds(editRoutePolyline.getBounds(), {padding:[24,24]});
+
+  editingRoutePoints.forEach((p,i)=>{
+    const isEndpoint = i===0 || i===editingRoutePoints.length-1;
+    const icon = L.divIcon({
+      className: '', html: `<div style="width:16px;height:16px;border-radius:50%;background:${i===0?'#3e7ca6':(isEndpoint?'#e8b23e':'#c1502e')};border:2px solid #fff;box-shadow:0 1px 3px rgba(0,0,0,0.4);"></div>`,
+      iconSize:[16,16], iconAnchor:[8,8]
+    });
+    const dragMarker = L.marker([p.lat,p.lng], { icon, draggable:true }).addTo(editRouteMap);
+    dragMarker.on('drag', e=>{
+      const ll = e.target.getLatLng();
+      editingRoutePoints[i] = { lat:ll.lat, lng:ll.lng };
+      editRoutePolyline.setLatLngs(editingRoutePoints.map(p=>[p.lat,p.lng]));
+    });
+    editRouteMarkers.push(dragMarker);
+  });
+}
+
 async function loadState(){
   try{
     const d = localStorage.getItem('pack-trail-dogs');
@@ -536,7 +607,7 @@ async function clearActiveWalkState(){
 }
 function startAutosave(){
   if(autosaveIntervalId) clearInterval(autosaveIntervalId);
-  autosaveIntervalId = setInterval(saveActiveWalkState, 8000);
+  autosaveIntervalId = setInterval(saveActiveWalkState, 60000);
   saveActiveWalkState();
 }
 function stopAutosave(){
@@ -627,6 +698,11 @@ function switchTab(tab){
   if(activeTab==='history' && tab!=='history' && historyMaps.length){
     historyMaps.forEach(m=>m.remove());
     historyMaps = [];
+  }
+  if(activeTab==='history' && tab!=='history' && editingRouteId){
+    if(editRouteMap){ editRouteMap.remove(); editRouteMap = null; }
+    editingRouteId = null;
+    editingRoutePoints = [];
   }
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===tab));
@@ -1083,6 +1159,7 @@ async function saveEditCare(type, id, checkInVal, checkOutVal){
 }
 
 function startEditWalk(w){
+  editingRouteId = null;
   editingWalkId = w.id;
   editDraft = { pee: w.pee||0, poop: w.poop||0, note: w.note||'' };
   render();
@@ -1091,12 +1168,20 @@ function cancelEditWalk(){
   editingWalkId = null;
   render();
 }
-async function saveEditWalk(id){
+async function saveEditWalk(id, startVal, endVal){
   const w = state.walks.find(w=>w.id===id);
   if(w){
     w.pee = editDraft.pee;
     w.poop = editDraft.poop;
     w.note = editDraft.note;
+    if(startVal && endVal){
+      const newStart = new Date(startVal);
+      const newEnd = new Date(endVal);
+      if(!isNaN(newStart) && !isNaN(newEnd) && newEnd >= newStart){
+        w.date = newStart.toISOString();
+        w.durationMs = newEnd - newStart;
+      }
+    }
     await saveWalks();
   }
   editingWalkId = null;
@@ -2044,7 +2129,16 @@ function renderHistory(container){
           ${w.distance ? `<div>${w.distance} mi<span>Distance</span></div>` : ''}
         </div>`;
       if(isEditing){
-        html += `${renderEditCounters()}
+        const endIso = new Date(new Date(w.date).getTime()+w.durationMs).toISOString();
+        html += `<div class="field" style="margin-top:14px;">
+          <label>Start time</label>
+          <input type="datetime-local" id="editWalkStart_${w.id}" value="${toDatetimeLocal(w.date)}">
+        </div>
+        <div class="field">
+          <label>End time</label>
+          <input type="datetime-local" id="editWalkEnd_${w.id}" value="${toDatetimeLocal(endIso)}">
+        </div>
+        ${renderEditCounters()}
         <div class="field">
           <label>Note</label>
           <textarea id="editNoteInput_${w.id}" placeholder="Sniffed every tree on Maple St.">${escapeHtml(editDraft.note)}</textarea>
@@ -2053,12 +2147,22 @@ function renderHistory(container){
           <button class="btn-ghost" data-cancel-edit="${w.id}">Cancel</button>
           <button class="btn-primary" data-save-edit="${w.id}">Save changes</button>
         </div>`;
+      } else if(editingRouteId === w.id){
+        html += `<div class="geo-status" style="margin-top:10px;">Drag a point to fix it.</div>
+        <div class="map-box large" id="editRouteMap"></div>
+        <div class="row2" style="margin-top:10px;">
+          <button class="btn-ghost" id="cancelEditRouteBtn">Cancel</button>
+          <button class="btn-primary" id="saveEditRouteBtn">Save route</button>
+        </div>`;
       } else {
         html += `${(w.pee || w.poop) ? `<div class="potty-badges">${w.pee ? `<span>💧 ${w.pee}</span>`:''}${w.poop ? `<span>💩 ${w.poop}</span>`:''}</div>` : ''}
         ${w.note ? `<div class="note">"${escapeHtml(w.note)}"</div>` : ''}
-        <button class="btn-ghost edit-link" data-edit="${w.id}">✎ Edit details</button>`;
+        <div class="row2" style="margin-top:10px;">
+          <button class="btn-ghost edit-link" data-edit="${w.id}">✎ Edit details</button>
+          ${w.route ? `<button class="btn-ghost edit-link" data-edit-route="${w.id}">✎ Edit route</button>` : ''}
+        </div>`;
       }
-      html += `${w.route ? `<div class="map-box thumb" id="routeMap_${w.id}"></div>` : ''}
+      html += `${(w.route && editingRouteId !== w.id) ? `<div class="map-box thumb" id="routeMap_${w.id}"></div>` : ''}
       </div>`;
     }
     html += `</div>`;
@@ -2130,7 +2234,10 @@ function renderHistory(container){
   }));
   container.querySelectorAll('[data-save-edit]').forEach(b=>b.addEventListener('click', e=>{
     e.stopPropagation();
-    saveEditWalk(b.dataset.saveEdit);
+    const id = b.dataset.saveEdit;
+    const startEl = container.querySelector(`#editWalkStart_${id}`);
+    const endEl = container.querySelector(`#editWalkEnd_${id}`);
+    saveEditWalk(id, startEl ? startEl.value : null, endEl ? endEl.value : null);
   }));
   if(editingWalkId){
     const noteEl = container.querySelector(`#editNoteInput_${editingWalkId}`);
@@ -2143,10 +2250,23 @@ function renderHistory(container){
     if(op) op.addEventListener('click', e=>{ e.stopPropagation(); adjustEditCount('poop',1); });
   }
 
+  container.querySelectorAll('[data-edit-route]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const w = state.walks.find(w=>w.id===b.dataset.editRoute);
+    if(w) startEditRoute(w);
+  }));
+  const cancelEditRouteBtn = container.querySelector('#cancelEditRouteBtn');
+  if(cancelEditRouteBtn) cancelEditRouteBtn.addEventListener('click', e=>{ e.stopPropagation(); cancelEditRoute(); });
+  const saveEditRouteBtn = container.querySelector('#saveEditRouteBtn');
+  if(saveEditRouteBtn) saveEditRouteBtn.addEventListener('click', e=>{ e.stopPropagation(); saveEditRoute(); });
+  if(editingRouteId){
+    initEditRouteMap();
+  }
+
   historyMaps.forEach(m=>m.remove());
   historyMaps = [];
   walks.forEach(w=>{
-    if(w.route && expandedWalks.has(w.id)){
+    if(w.route && expandedWalks.has(w.id) && editingRouteId!==w.id){
       const m = initRouteMap('routeMap_'+w.id, w.route, {interactive:false});
       if(m) historyMaps.push(m);
     }
