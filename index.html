@@ -171,9 +171,9 @@
   .row2 > *{flex:1;}
   .row3{display:flex;gap:8px;}
   .row3 > *{flex:1;padding:13px 6px;font-size:12px;}
-  .btn-discard{background:#f5d3ca;color:#8a2e15;}
-  .btn-resume{background:#faedb8;color:#6b5220;}
-  .btn-save{background:#cfe3d4;color:#2f4d38;}
+  .btn-discard{background:var(--rust);color:#fff;}
+  .btn-resume{background:var(--blaze-yellow);color:var(--ink);}
+  .btn-save{background:var(--trail-green);color:#fff;}
 
   /* Map */
   .map-box{
@@ -245,6 +245,8 @@ let poopCount = 0;
 let draftDistance = '';
 let draftDistanceIsAuto = true;
 let draftNote = '';
+let autosaveIntervalId = null;
+let recoveredWalk = null; // in-progress walk data found on load, if the app closed unexpectedly
 let daycareExpanded = false;
 let daycareAction = null; // 'checkin' | 'checkout'
 let boardingExpanded = false;
@@ -255,6 +257,7 @@ let boardingTypeSelection = BOARDING_TYPES[0];
 function adjustCount(which, delta){
   if(which==='pee') peeCount = Math.max(0, peeCount+delta);
   else poopCount = Math.max(0, poopCount+delta);
+  if(timerRunning) saveActiveWalkState();
   render();
 }
 
@@ -371,14 +374,14 @@ document.addEventListener('visibilitychange', async ()=>{
   }
 });
 
-function startGeoTracking(){
+function startGeoTracking(existingRoute){
   if(!('geolocation' in navigator)){
     geoStatus = 'unavailable';
     render();
     return;
   }
   geoStatus = 'locating';
-  currentRoute = [];
+  currentRoute = existingRoute && existingRoute.length ? [...existingRoute] : [];
   geoWatchId = navigator.geolocation.watchPosition(
     pos => {
       const pt = { lat: pos.coords.latitude, lng: pos.coords.longitude };
@@ -489,6 +492,10 @@ async function loadState(){
     const b = localStorage.getItem('pack-trail-boarding');
     state.boarding = b ? JSON.parse(b) : [];
   }catch(e){ state.boarding = []; }
+  try{
+    const a = localStorage.getItem('pack-trail-activeWalk');
+    recoveredWalk = a ? JSON.parse(a) : null;
+  }catch(e){ recoveredWalk = null; }
   render();
 }
 
@@ -507,6 +514,88 @@ async function saveDaycare(){
 async function saveBoarding(){
   try{ localStorage.setItem('pack-trail-boarding', JSON.stringify(state.boarding)); }
   catch(e){ console.error('save boarding failed', e); }
+}
+
+// ---- Crash/close recovery for an in-progress walk ----
+async function saveActiveWalkState(){
+  if(!timerRunning) return;
+  const snapshot = {
+    selectedDogIds: [...selectedDogIds],
+    elapsedMs,
+    currentRoute: [...currentRoute],
+    peeCount, poopCount,
+    draftNote, draftDistance, draftDistanceIsAuto,
+    savedAt: new Date().toISOString()
+  };
+  try{ localStorage.setItem('pack-trail-activeWalk', JSON.stringify(snapshot)); }
+  catch(e){ console.warn('walk autosave failed', e); }
+}
+async function clearActiveWalkState(){
+  try{ localStorage.removeItem('pack-trail-activeWalk'); }
+  catch(e){ /* nothing to clean up */ }
+}
+function startAutosave(){
+  if(autosaveIntervalId) clearInterval(autosaveIntervalId);
+  autosaveIntervalId = setInterval(saveActiveWalkState, 8000);
+  saveActiveWalkState();
+}
+function stopAutosave(){
+  if(autosaveIntervalId){ clearInterval(autosaveIntervalId); autosaveIntervalId = null; }
+}
+
+function resumeRecoveredWalk(){
+  if(!recoveredWalk) return;
+  const r = recoveredWalk;
+  recoveredWalk = null;
+  selectedDogIds = r.selectedDogIds || [];
+  elapsedMs = r.elapsedMs || 0;
+  peeCount = r.peeCount || 0;
+  poopCount = r.poopCount || 0;
+  draftNote = r.draftNote || '';
+  draftDistance = r.draftDistance || '';
+  draftDistanceIsAuto = r.draftDistanceIsAuto !== false;
+  timerRunning = true;
+  reviewing = false;
+  timerStart = Date.now() - elapsedMs;
+  timerInterval = setInterval(()=>{
+    elapsedMs = Date.now() - timerStart;
+    const disp = document.getElementById('timerDisplay');
+    if(disp) disp.textContent = fmtTime(elapsedMs);
+  }, 500);
+  startGeoTracking(r.currentRoute);
+  requestWakeLock();
+  startAutosave();
+  render();
+}
+
+async function saveRecoveredWalkDirectly(){
+  if(!recoveredWalk) return;
+  const r = recoveredWalk;
+  recoveredWalk = null;
+  await clearActiveWalkState();
+  const route = r.currentRoute && r.currentRoute.length>1 ? r.currentRoute : null;
+  const walk = {
+    id: 'w_'+Date.now(),
+    dogIds: r.selectedDogIds || [],
+    durationMs: r.elapsedMs || 0,
+    distance: r.draftDistance ? parseFloat(r.draftDistance) : (route ? parseFloat(routeDistanceMiles(route).toFixed(2)) : null),
+    note: r.draftNote || '',
+    date: new Date().toISOString(),
+    route,
+    pee: r.peeCount || 0,
+    poop: r.poopCount || 0
+  };
+  state.walks.unshift(walk);
+  await saveWalks();
+  if(walk.route) attemptRouteSnapForWalk(walk.id, walk.route);
+  switchTab('history');
+}
+
+async function discardRecoveredWalk(){
+  if(!confirm("Discard this unfinished walk? This can't be undone.")) return;
+  recoveredWalk = null;
+  await clearActiveWalkState();
+  render();
 }
 
 function fmtTime(ms){
@@ -647,12 +736,13 @@ function startTimer(){
   }, 500);
   startGeoTracking();
   requestWakeLock();
+  startAutosave();
   render();
 }
 
 // "Stop walk" just opens the review screen — timer, GPS, and the wake lock
 // all keep running in the background so nothing is lost if this was an
-// accidental tap. Tracking only truly ends at Discard or Save.
+// accidental tap. Tracking only truly ends when Save is pressed.
 function enterReview(){
   reviewing = true;
   render();
@@ -663,27 +753,14 @@ function resumeWalk(){
   render();
 }
 
-// Actually stops the timer/GPS/wake lock. Only called from Discard or Save.
+// Actually stops the timer/GPS/wake lock. Only called when a walk is saved.
 function finalizeTracking(){
   timerRunning = false;
   clearInterval(timerInterval);
   stopGeoTracking(); // captures currentRoute into lastSavedRoute
   releaseWakeLock();
-}
-
-function discardWalk(){
-  finalizeTracking();
-  elapsedMs = 0;
-  selectedDogIds = [];
-  lastSavedRoute = [];
-  geoStatus = 'idle';
-  reviewing = false;
-  peeCount = 0;
-  poopCount = 0;
-  draftDistance = '';
-  draftDistanceIsAuto = true;
-  draftNote = '';
-  render();
+  stopAutosave();
+  clearActiveWalkState();
 }
 
 async function saveWalk(distance, note){
@@ -731,6 +808,22 @@ async function removeDog(id){
 function renderTrack(container){
   const noDogs = state.dogs.length===0;
   let html = '';
+
+  if(recoveredWalk && !timerRunning){
+    const r = recoveredWalk;
+    const dogNames = (r.selectedDogIds||[]).map(id=>{ const dog=dogById(id); return dog?dog.name:null; }).filter(Boolean).join(', ');
+    const savedAgo = r.savedAt ? new Date(r.savedAt).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}) : '';
+    html += `<div class="card dark">
+      <h3 style="margin-bottom:6px;">Unfinished walk found</h3>
+      <div class="timer-sub" style="margin-bottom:12px;">${dogNames ? dogNames+' · ' : ''}${fmtTime(r.elapsedMs||0)} recorded${savedAgo? ' · last seen '+savedAgo : ''}</div>
+      <div class="row3">
+        <button class="btn-discard" id="discardRecoveredBtn">Discard</button>
+        <button class="btn-resume" id="resumeRecoveredBtn">Resume</button>
+        ${(r.selectedDogIds||[]).length ? '<button class="btn-save" id="saveRecoveredBtn">Save as-is</button>' : ''}
+      </div>
+    </div>`;
+  }
+
   if(noDogs){
     html += `<div class="card"><div class="empty"><div class="empty-title">No dogs yet</div>Add a dog on the Dogs tab before you start a walk.</div></div>`;
   } else if(reviewing){
@@ -764,10 +857,9 @@ function renderTrack(container){
         <label>Note (optional)</label>
         <textarea id="noteInput" placeholder="Sniffed every tree on Maple St.">${draftNote}</textarea>
       </div>
-      <div class="row3">
-        <button class="btn-discard" id="discardBtn">Discard</button>
-        <button class="btn-resume" id="resumeBtn">Resume walk</button>
-        <button class="btn-save" id="saveWalkBtn">Save walk</button>
+      <div class="row2">
+        <button class="btn-resume" id="resumeBtn">Resume</button>
+        <button class="btn-save" id="saveWalkBtn">Save</button>
       </div>
     </div>`;
   } else {
@@ -855,6 +947,13 @@ function renderTrack(container){
     initLiveMap();
   }
 
+  const discardRecoveredBtn = container.querySelector('#discardRecoveredBtn');
+  if(discardRecoveredBtn) discardRecoveredBtn.addEventListener('click', discardRecoveredWalk);
+  const resumeRecoveredBtn = container.querySelector('#resumeRecoveredBtn');
+  if(resumeRecoveredBtn) resumeRecoveredBtn.addEventListener('click', resumeRecoveredWalk);
+  const saveRecoveredBtn = container.querySelector('#saveRecoveredBtn');
+  if(saveRecoveredBtn) saveRecoveredBtn.addEventListener('click', saveRecoveredWalkDirectly);
+
   container.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{ if(!timerRunning) toggleDogSelect(c.dataset.id); }));
   const startBtn = container.querySelector('#startBtn');
   if(startBtn) startBtn.addEventListener('click', startTimer);
@@ -862,8 +961,6 @@ function renderTrack(container){
   if(stopBtn) stopBtn.addEventListener('click', enterReview);
   const resumeBtn = container.querySelector('#resumeBtn');
   if(resumeBtn) resumeBtn.addEventListener('click', resumeWalk);
-  const discardBtn = container.querySelector('#discardBtn');
-  if(discardBtn) discardBtn.addEventListener('click', discardWalk);
   const saveBtn = container.querySelector('#saveWalkBtn');
   if(saveBtn) saveBtn.addEventListener('click', ()=>{
     const dist = container.querySelector('#distInput').value;
