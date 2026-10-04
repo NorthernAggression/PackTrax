@@ -1709,6 +1709,28 @@ async function shareBoarding(s){
 }
 
 // ---- Invoice ----
+// ---- Treat walks, daycare, and boarding uniformly for invoicing ----
+function getInvoiceableRecords(){
+  return [
+    ...state.walks.map(r => ({ type:'walk', id:r.id, record:r })),
+    ...state.daycare.map(r => ({ type:'daycare', id:r.id, record:r })),
+    ...state.boarding.map(r => ({ type:'boarding', id:r.id, record:r }))
+  ];
+}
+function invRecordDate(type, r){ return type==='walk' ? new Date(r.date) : new Date(r.checkInAt); }
+function invRecordDurationMs(type, r){
+  if(type==='walk') return r.durationMs;
+  return r.checkOutAt ? (new Date(r.checkOutAt) - new Date(r.checkInAt)) : null;
+}
+function invRecordDurationLabel(type, r){
+  const ms = invRecordDurationMs(type, r);
+  if(ms==null) return 'ongoing';
+  return type==='boarding' ? fmtLongDuration(ms) : fmtTime(ms);
+}
+function invRecordTypeLabel(type){ return type==='walk' ? 'Walk' : (type==='daycare' ? 'Daycare' : 'Boarding'); }
+function invRecordArray(type){ return type==='walk' ? state.walks : (type==='daycare' ? state.daycare : state.boarding); }
+function invRecordSave(type){ return type==='walk' ? saveWalks : (type==='daycare' ? saveDaycare : saveBoarding); }
+
 function toggleInvoiceSelect(id){
   if(invoiceSelection.has(id)) invoiceSelection.delete(id);
   else invoiceSelection.add(id);
@@ -1716,12 +1738,12 @@ function toggleInvoiceSelect(id){
 }
 
 function updateInvoiceTotalDisplay(){
-  const selected = state.walks.filter(w=>invoiceSelection.has(w.id));
+  const selected = getInvoiceableRecords().filter(x=>invoiceSelection.has(x.id));
   let total = 0;
-  selected.forEach(w=>{
-    const price = parseFloat(invoicePrices[w.id]) || 0;
+  selected.forEach(({id})=>{
+    const price = parseFloat(invoicePrices[id]) || 0;
     total += price;
-    const lineEl = document.getElementById('invLinePrice_'+w.id);
+    const lineEl = document.getElementById('invLinePrice_'+id);
     if(lineEl) lineEl.textContent = '$'+price.toFixed(2);
   });
   const totalEl = document.getElementById('invoiceTotalVal');
@@ -1744,8 +1766,8 @@ async function buildInvoiceSnapshot(items){
   roundRectPath(ctx,0,0,W,H,0); ctx.fill();
 
   const dogNameSet = new Set();
-  items.forEach(({walk})=>{
-    walk.dogIds.forEach(id=>{
+  items.forEach(({type, record})=>{
+    record.dogIds.forEach(id=>{
       const dog = dogById(id);
       dogNameSet.add(dog ? dog.name : 'Unknown');
     });
@@ -1770,8 +1792,9 @@ async function buildInvoiceSnapshot(items){
   ctx.font = '600 11px Inter, sans-serif';
   ctx.fillStyle = '#6a634c';
   ctx.fillText('DATE', padding, y);
-  ctx.fillText('TIME', padding+140, y);
-  ctx.fillText('DURATION', padding+320, y);
+  ctx.fillText('TYPE', padding+110, y);
+  ctx.fillText('TIME', padding+210, y);
+  ctx.fillText('DURATION', padding+330, y);
   ctx.fillText('PRICE', padding+contentW-60, y);
   y += 20;
   ctx.strokeStyle = '#d9cfb0'; ctx.lineWidth = 1;
@@ -1779,17 +1802,22 @@ async function buildInvoiceSnapshot(items){
   y += 14;
 
   let total = 0;
-  items.forEach(({walk, price})=>{
-    const d = new Date(walk.date);
+  items.forEach(({type, record, price})=>{
+    const d = invRecordDate(type, record);
     const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
     const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
 
     ctx.font = '500 14px Inter, sans-serif';
     ctx.fillStyle = '#211f14';
     ctx.fillText(dateStr, padding, y);
-    ctx.fillText(timeStr, padding+140, y);
-    ctx.font = '600 14px "JetBrains Mono", monospace';
-    ctx.fillText(fmtTime(walk.durationMs), padding+320, y);
+    ctx.font = '500 13px Inter, sans-serif';
+    ctx.fillStyle = '#6a634c';
+    ctx.fillText(invRecordTypeLabel(type), padding+110, y+1);
+    ctx.font = '500 14px Inter, sans-serif';
+    ctx.fillStyle = '#211f14';
+    ctx.fillText(timeStr, padding+210, y);
+    ctx.font = '600 13px "JetBrains Mono", monospace';
+    ctx.fillText(invRecordDurationLabel(type, record), padding+330, y);
     ctx.font = '700 15px "JetBrains Mono", monospace';
     ctx.fillText('$'+price.toFixed(2), padding+contentW-60, y);
     total += price;
@@ -1813,15 +1841,15 @@ function buildVenmoLink(items){
   const totalStr = total.toFixed(2);
 
   const dogNameSet = new Set();
-  items.forEach(({walk})=>{
-    walk.dogIds.forEach(id=>{
+  items.forEach(({record})=>{
+    record.dogIds.forEach(id=>{
       const dog = dogById(id);
       dogNameSet.add(dog ? dog.name : 'Unknown');
     });
   });
   const dogNames = Array.from(dogNameSet).join(' & ');
 
-  const dates = items.map(({walk})=> new Date(walk.date)).sort((a,b)=>a-b);
+  const dates = items.map(({type, record})=> invRecordDate(type, record)).sort((a,b)=>a-b);
   const fmtShort = d => d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
   const minStr = fmtShort(dates[0]);
   const maxStr = fmtShort(dates[dates.length-1]);
@@ -1852,8 +1880,9 @@ async function shareInvoice(items){
 }
 
 function renderInvoice(container){
-  if(state.walks.length===0){
-    container.innerHTML = `<div class="card"><div class="empty"><div class="empty-title">No walks yet</div>Log some walks first, then come back to build an invoice.</div></div>`;
+  const everything = getInvoiceableRecords();
+  if(everything.length===0){
+    container.innerHTML = `<div class="card"><div class="empty"><div class="empty-title">Nothing to invoice yet</div>Log a walk, or check a dog into daycare or boarding, then come back to build an invoice.</div></div>`;
     return;
   }
 
@@ -1865,48 +1894,52 @@ function renderInvoice(container){
   });
   html += `</div>`;
 
-  const walks = state.walks.filter(w => invoiceFilter==='all' || w.dogIds.includes(invoiceFilter));
-  const allSelected = walks.length>0 && walks.every(w=>invoiceSelection.has(w.id));
+  const items = everything
+    .filter(x => invoiceFilter==='all' || x.record.dogIds.includes(invoiceFilter))
+    .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
+  const allSelected = items.length>0 && items.every(x=>invoiceSelection.has(x.id));
 
   html += `<div class="card dark select-all-row">
     <input type="checkbox" id="selectAllInv" ${allSelected?'checked':''}>
-    <label for="selectAllInv">Select all (${walks.length} walk${walks.length!==1?'s':''})</label>
+    <label for="selectAllInv">Select all (${items.length} item${items.length!==1?'s':''})</label>
   </div>`;
 
   html += `<div class="card" style="padding:2px 0;">`;
-  walks.forEach(w=>{
-    const d = new Date(w.date);
+  items.forEach(({type, id, record})=>{
+    const d = invRecordDate(type, record);
     const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
     const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-    const dogNames = w.dogIds.map(id=>{ const dog=dogById(id); return dog?dog.name:'(removed dog)'; }).join(', ');
-    const isSelected = invoiceSelection.has(w.id);
-    if(invoicePrices[w.id]===undefined) invoicePrices[w.id] = (w.price!=null ? String(w.price) : '');
+    const dogNames = record.dogIds.map(did=>{ const dog=dogById(did); return dog?dog.name:'(removed dog)'; }).join(', ');
+    const isSelected = invoiceSelection.has(id);
+    if(invoicePrices[id]===undefined) invoicePrices[id] = (record.price!=null ? String(record.price) : '');
+    const metaBits = [dogNames, invRecordTypeLabel(type), invRecordDurationLabel(type, record)];
+    if(type==='walk' && record.distance) metaBits.push(record.distance+' mi');
     html += `<div class="invoice-row ${isSelected?'selected':''}">
-      <input type="checkbox" data-invcheck="${w.id}" ${isSelected?'checked':''}>
+      <input type="checkbox" data-invcheck="${id}" ${isSelected?'checked':''}>
       <div class="invoice-row-info">
         <div class="invoice-row-top">${dateStr} <span style="color:var(--ink-dim);font-weight:400;">· ${timeStr}</span></div>
-        <div class="invoice-row-meta">${dogNames} · ${fmtTime(w.durationMs)}${w.distance? ' · '+w.distance+' mi':''}</div>
+        <div class="invoice-row-meta">${metaBits.join(' · ')}</div>
       </div>
       <div class="invoice-price-field">
         <span>$</span>
-        <input type="number" step="0.01" min="0" placeholder="0.00" data-invprice="${w.id}" value="${invoicePrices[w.id]}">
+        <input type="number" step="0.01" min="0" placeholder="0.00" data-invprice="${id}" value="${invoicePrices[id]}">
       </div>
     </div>`;
   });
   html += `</div>`;
 
-  const selectedWalks = walks.filter(w=>invoiceSelection.has(w.id));
-  if(selectedWalks.length>0){
+  const selectedItems = items.filter(x=>invoiceSelection.has(x.id));
+  if(selectedItems.length>0){
     let total = 0;
     html += `<div class="card"><h3 style="margin-bottom:10px;color:var(--ink);">Invoice summary</h3>`;
-    selectedWalks.forEach(w=>{
-      const d = new Date(w.date);
+    selectedItems.forEach(({type, id, record})=>{
+      const d = invRecordDate(type, record);
       const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
-      const price = parseFloat(invoicePrices[w.id]) || 0;
+      const price = parseFloat(invoicePrices[id]) || 0;
       total += price;
-      html += `<div class="invoice-line" id="invLine_${w.id}">
-        <div>${dateStr} · ${fmtTime(w.durationMs)}</div>
-        <div class="invoice-line-price" id="invLinePrice_${w.id}">$${price.toFixed(2)}</div>
+      html += `<div class="invoice-line" id="invLine_${id}">
+        <div>${dateStr} · ${invRecordTypeLabel(type)} · ${invRecordDurationLabel(type, record)}</div>
+        <div class="invoice-line-price" id="invLinePrice_${id}">$${price.toFixed(2)}</div>
       </div>`;
     });
     html += `<div class="invoice-total-row"><span>Total</span><span id="invoiceTotalVal">$${total.toFixed(2)}</span></div>
@@ -1921,8 +1954,8 @@ function renderInvoice(container){
 
   const selectAll = container.querySelector('#selectAllInv');
   if(selectAll) selectAll.addEventListener('change', e=>{
-    if(e.target.checked) walks.forEach(w=>invoiceSelection.add(w.id));
-    else walks.forEach(w=>invoiceSelection.delete(w.id));
+    if(e.target.checked) items.forEach(x=>invoiceSelection.add(x.id));
+    else items.forEach(x=>invoiceSelection.delete(x.id));
     render();
   });
 
@@ -1937,18 +1970,18 @@ function renderInvoice(container){
     });
     inp.addEventListener('change', async e=>{
       const id = e.target.dataset.invprice;
-      const w = state.walks.find(w=>w.id===id);
-      if(w){
-        w.price = e.target.value===''? null : parseFloat(e.target.value);
-        await saveWalks();
+      const match = items.find(x=>x.id===id);
+      if(match){
+        match.record.price = e.target.value===''? null : parseFloat(e.target.value);
+        await invRecordSave(match.type)();
       }
     });
   });
 
   const shareBtn = container.querySelector('#shareInvoiceBtn');
   if(shareBtn) shareBtn.addEventListener('click', ()=>{
-    const items = selectedWalks.map(w=>({ walk:w, price: parseFloat(invoicePrices[w.id])||0 }));
-    shareInvoice(items);
+    const shareItems = selectedItems.map(({type, record, id})=>({ type, record, price: parseFloat(invoicePrices[id])||0 }));
+    shareInvoice(shareItems);
   });
 }
 
