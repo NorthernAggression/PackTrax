@@ -1318,6 +1318,15 @@ function loadTileImage(url){
     img.src = url;
   });
 }
+// Try a CORS-friendly source first (Esri's tile service reliably sends
+// Access-Control-Allow-Origin), then fall back to Carto per-tile if that fails.
+async function loadMapTile(zoom, tx, ty, subdomain){
+  const esriUrl = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/${zoom}/${ty}/${tx}`;
+  let img = await loadTileImage(esriUrl);
+  if(img) return img;
+  const cartoUrl = `https://${subdomain}.basemaps.cartocdn.com/rastertiles/voyager/${zoom}/${tx}/${ty}.png`;
+  return loadTileImage(cartoUrl);
+}
 async function renderMapCanvas(route, targetW, targetH){
   const TILE = 256;
   const lats = route.map(p=>p.lat), lngs = route.map(p=>p.lng);
@@ -1343,17 +1352,23 @@ async function renderMapCanvas(route, targetW, targetH){
 
   const subdomains = ['a','b','c','d'];
   let si = 0;
+  let loadedCount = 0;
+  let totalCount = 0;
   const loads = [];
   for(let tx=txMin; tx<=txMax; tx++){
     for(let ty=tyMin; ty<=tyMax; ty++){
       const s = subdomains[si++ % subdomains.length];
-      const url = `https://${s}.basemaps.cartocdn.com/rastertiles/voyager/${zoom}/${tx}/${ty}.png`;
-      loads.push(loadTileImage(url).then(img=>{
-        if(img) gctx.drawImage(img, (tx-txMin)*TILE, (ty-tyMin)*TILE, TILE, TILE);
+      totalCount++;
+      loads.push(loadMapTile(zoom, tx, ty, s).then(img=>{
+        if(img){ gctx.drawImage(img, (tx-txMin)*TILE, (ty-tyMin)*TILE, TILE, TILE); loadedCount++; }
       }));
     }
   }
   await Promise.all(loads);
+
+  // Every tile failed (likely blocked by the browser/network) — let the
+  // caller fall back to the abstract route sketch instead of a blank map.
+  if(loadedCount === 0) return null;
 
   const srcX = (x0-txMin)*TILE, srcY = (y0-tyMin)*TILE;
   const srcW = (x1-x0)*TILE, srcH = (y1-y0)*TILE;
@@ -1775,6 +1790,7 @@ function invRecordDurationLabel(type, r){
   return type==='boarding' ? fmtLongDuration(ms) : fmtTime(ms);
 }
 function invRecordTypeLabel(type){ return type==='walk' ? 'Walk' : (type==='daycare' ? 'Daycare' : 'Boarding'); }
+function invDefaultPrice(type){ return type==='walk' ? 15 : (type==='daycare' ? 25 : 50); }
 function invRecordArray(type){ return type==='walk' ? state.walks : (type==='daycare' ? state.daycare : state.boarding); }
 function invRecordSave(type){ return type==='walk' ? saveWalks : (type==='daycare' ? saveDaycare : saveBoarding); }
 
@@ -1958,7 +1974,7 @@ function renderInvoice(container){
     const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
     const dogNames = record.dogIds.map(did=>{ const dog=dogById(did); return dog?dog.name:'(removed dog)'; }).join(', ');
     const isSelected = invoiceSelection.has(id);
-    if(invoicePrices[id]===undefined) invoicePrices[id] = (record.price!=null ? String(record.price) : '');
+    if(invoicePrices[id]===undefined) invoicePrices[id] = (record.price!=null ? String(record.price) : String(invDefaultPrice(type)));
     const metaBits = [dogNames, invRecordTypeLabel(type), invRecordDurationLabel(type, record)];
     if(type==='walk' && record.distance) metaBits.push(record.distance+' mi');
     html += `<div class="invoice-row ${isSelected?'selected':''}">
