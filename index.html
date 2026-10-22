@@ -508,18 +508,18 @@ function cancelEditRoute(){
   render();
 }
 
-async function saveEditRoute(){
+function saveEditRoute(){
   const w = state.walks.find(w=>w.id===editingRouteId);
   if(w && editingRoutePoints.length>1){
     w.route = editingRoutePoints.map(p=>({...p}));
     w.distance = parseFloat(routeDistanceMiles(w.route).toFixed(2));
-    await saveWalks();
   }
   editingRouteId = null;
   editingRoutePoints = [];
   if(editRouteMap){ editRouteMap.remove(); editRouteMap = null; }
   editRouteMarkers = [];
   render();
+  if(w) saveWalks(); // persist in the background, UI already updated
 }
 
 function initEditRouteMap(){
@@ -704,9 +704,8 @@ async function saveRecoveredWalkDirectly(){
     poop: r.poopCount || 0
   };
   state.walks.unshift(walk);
-  await saveWalks();
-  if(walk.route) attemptRouteSnapForWalk(walk.id, walk.route);
   switchTab('history');
+  saveWalks().then(()=>{ if(walk.route) attemptRouteSnapForWalk(walk.id, walk.route); });
 }
 
 async function discardRecoveredWalk(){
@@ -785,7 +784,7 @@ function cancelDaycarePrompt(){
   render();
 }
 
-async function confirmDaycareAction(){
+function confirmDaycareAction(){
   const now = new Date().toISOString();
   if(daycareAction === 'checkin'){
     selectedDogIds.forEach(id=>{
@@ -799,10 +798,10 @@ async function confirmDaycareAction(){
       if(sess) sess.checkOutAt = now;
     });
   }
-  await saveDaycare();
   daycareExpanded = false;
   daycareAction = null;
   render();
+  saveDaycare();
 }
 
 // ---- Boarding check-in / check-out ----
@@ -827,7 +826,7 @@ function cancelBoardingPrompt(){
   render();
 }
 
-async function confirmBoardingAction(){
+function confirmBoardingAction(){
   const now = new Date().toISOString();
   if(boardingAction === 'checkin'){
     selectedDogIds.forEach(id=>{
@@ -841,10 +840,10 @@ async function confirmBoardingAction(){
       if(sess) sess.checkOutAt = now;
     });
   }
-  await saveBoarding();
   boardingExpanded = false;
   boardingAction = null;
   render();
+  saveBoarding();
 }
 
 function startTimer(){
@@ -886,7 +885,7 @@ function finalizeTracking(){
   clearActiveWalkState();
 }
 
-async function saveWalk(distance, note){
+function saveWalk(distance, note){
   finalizeTracking();
   const walk = {
     id: 'w_'+Date.now(),
@@ -900,8 +899,6 @@ async function saveWalk(distance, note){
     poop: poopCount
   };
   state.walks.unshift(walk);
-  await saveWalks();
-  if(walk.route) attemptRouteSnapForWalk(walk.id, walk.route);
   elapsedMs = 0;
   selectedDogIds = [];
   lastSavedRoute = [];
@@ -913,19 +910,27 @@ async function saveWalk(distance, note){
   draftDistanceIsAuto = true;
   draftNote = '';
   switchTab('history');
+  saveWalks().then(()=>{ if(walk.route) attemptRouteSnapForWalk(walk.id, walk.route); });
 }
 
-async function addDog(name, color){
+function addDog(name, color){
   if(!name.trim()) return;
   state.dogs.push({ id:'d_'+Date.now(), name:name.trim(), color });
-  await saveDogs();
   render();
+  saveDogs();
 }
 
-async function removeDog(id){
-  state.dogs = state.dogs.filter(d=>d.id!==id);
-  await saveDogs();
+function toggleDogFavorite(id){
+  const d = dogById(id);
+  if(!d) return;
+  d.favorite = !d.favorite;
   render();
+  saveDogs();
+}
+function removeDog(id){
+  state.dogs = state.dogs.filter(d=>d.id!==id);
+  render();
+  saveDogs();
 }
 
 function renderTrack(container){
@@ -986,15 +991,35 @@ function renderTrack(container){
       </div>
     </div>`;
   } else {
+    const favDogs = state.dogs.filter(d=>d.favorite);
+    const extraSelected = selectedDogIds.filter(id=>{ const dog=dogById(id); return dog && !dog.favorite; });
     html += `<div class="card">
       <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Who's being cared for?</label>
       <div class="dog-picker">`;
-    state.dogs.forEach(d=>{
-      const sel = selectedDogIds.includes(d.id);
-      html += `<div class="chip ${sel?'selected':''}" style="background:${sel? d.color:'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-id="${d.id}">${d.name}</div>`;
-    });
+    if(favDogs.length===0){
+      html += `<div style="font-size:13px;color:var(--ink-dim);">Star a dog on the Dogs tab to see it here, or pick one below.</div>`;
+    } else {
+      favDogs.forEach(d=>{
+        const sel = selectedDogIds.includes(d.id);
+        html += `<div class="chip ${sel?'selected':''}" style="background:${sel? d.color:'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-id="${d.id}">${d.name}</div>`;
+      });
+    }
     html += `</div>
-    </div>`;
+      <select id="dogDropdown" style="margin-top:10px;width:100%;padding:10px;border-radius:10px;border:1px solid var(--line);background:var(--parchment-dim);color:var(--ink);font-size:14px;">
+        <option value="">+ Add a dog…</option>`;
+    state.dogs.forEach(d=>{
+      html += `<option value="${d.id}">${d.name}</option>`;
+    });
+    html += `</select>`;
+    if(extraSelected.length){
+      html += `<div class="dog-picker" style="margin-top:10px;">`;
+      extraSelected.forEach(id=>{
+        const d = dogById(id);
+        html += `<div class="chip selected" style="background:${d.color};color:#fff;" data-id="${d.id}">${d.name} ✕</div>`;
+      });
+      html += `</div>`;
+    }
+    html += `</div>`;
 
     html += `<div class="card">
       <div class="timer-display" id="timerDisplay">${fmtTime(elapsedMs)}</div>
@@ -1078,6 +1103,14 @@ function renderTrack(container){
   if(saveRecoveredBtn) saveRecoveredBtn.addEventListener('click', saveRecoveredWalkDirectly);
 
   container.querySelectorAll('.chip').forEach(c=>c.addEventListener('click',()=>{ if(!timerRunning) toggleDogSelect(c.dataset.id); }));
+  const dogDropdown = container.querySelector('#dogDropdown');
+  if(dogDropdown) dogDropdown.addEventListener('change', e=>{
+    const id = e.target.value;
+    if(id && !timerRunning){
+      if(!selectedDogIds.includes(id)) selectedDogIds.push(id);
+      render();
+    }
+  });
   const startBtn = container.querySelector('#startBtn');
   if(startBtn) startBtn.addEventListener('click', startTimer);
   const stopBtn = container.querySelector('#stopBtn');
@@ -1135,6 +1168,7 @@ function renderDogs(container){
       html += `<div class="dog-row">
         <div class="dot" style="background:${d.color}"></div>
         <div class="dog-name">${d.name}<div class="dog-meta">${walkCount} walk${walkCount!==1?'s':''} logged</div></div>
+        <div class="fav-heart ${d.favorite?'active':''}" data-id="${d.id}" style="font-size:20px;cursor:pointer;margin-right:4px;color:${d.favorite?'var(--rust)':'var(--ink-dim)'};">${d.favorite?'♥':'♡'}</div>
         <div class="remove-x" data-id="${d.id}">✕</div>
       </div>`;
     });
@@ -1153,29 +1187,30 @@ function renderDogs(container){
     addDog(name, chosenColor);
   });
   container.querySelectorAll('.remove-x').forEach(x=>x.addEventListener('click', ()=>removeDog(x.dataset.id)));
+  container.querySelectorAll('.fav-heart').forEach(h=>h.addEventListener('click', ()=>toggleDogFavorite(h.dataset.id)));
 }
 
-async function deleteWalk(id){
+function deleteWalk(id){
   if(!confirm("Delete this walk? This can't be undone.")) return;
   state.walks = state.walks.filter(w=>w.id!==id);
   expandedWalks.delete(id);
   if(editingWalkId===id) editingWalkId = null;
-  await saveWalks();
   render();
+  saveWalks();
 }
 
-async function deleteDaycare(id){
+function deleteDaycare(id){
   if(!confirm("Delete this daycare record? This can't be undone.")) return;
   state.daycare = state.daycare.filter(s=>s.id!==id);
-  await saveDaycare();
   render();
+  saveDaycare();
 }
 
-async function deleteBoarding(id){
+function deleteBoarding(id){
   if(!confirm("Delete this boarding record? This can't be undone.")) return;
   state.boarding = state.boarding.filter(s=>s.id!==id);
-  await saveBoarding();
   render();
+  saveBoarding();
 }
 
 // ---- Editing daycare/boarding check-in / check-out times ----
@@ -1193,16 +1228,16 @@ function cancelEditCare(){
   editingCareId = null;
   render();
 }
-async function saveEditCare(type, id, checkInVal, checkOutVal){
+function saveEditCare(type, id, checkInVal, checkOutVal){
   const list = type==='daycare' ? state.daycare : state.boarding;
   const s = list.find(x=>x.id===id);
   if(s){
     if(checkInVal) s.checkInAt = new Date(checkInVal).toISOString();
     s.checkOutAt = checkOutVal ? new Date(checkOutVal).toISOString() : null;
-    if(type==='daycare') await saveDaycare(); else await saveBoarding();
   }
   editingCareId = null;
   render();
+  if(s){ if(type==='daycare') saveDaycare(); else saveBoarding(); }
 }
 
 function startEditWalk(w){
@@ -1215,7 +1250,7 @@ function cancelEditWalk(){
   editingWalkId = null;
   render();
 }
-async function saveEditWalk(id, startVal, endVal){
+function saveEditWalk(id, startVal, endVal){
   const w = state.walks.find(w=>w.id===id);
   if(w){
     w.pee = editDraft.pee;
@@ -1229,10 +1264,10 @@ async function saveEditWalk(id, startVal, endVal){
         w.durationMs = newEnd - newStart;
       }
     }
-    await saveWalks();
   }
   editingWalkId = null;
   render();
+  if(w) saveWalks();
 }
 function adjustEditCount(which, delta){
   if(which==='pee') editDraft.pee = Math.max(0, editDraft.pee+delta);
@@ -2031,12 +2066,12 @@ function renderInvoice(container){
       invoicePrices[e.target.dataset.invprice] = e.target.value;
       updateInvoiceTotalDisplay();
     });
-    inp.addEventListener('change', async e=>{
+    inp.addEventListener('change', e=>{
       const id = e.target.dataset.invprice;
       const match = items.find(x=>x.id===id);
       if(match){
         match.record.price = e.target.value===''? null : parseFloat(e.target.value);
-        await invRecordSave(match.type)();
+        invRecordSave(match.type)();
       }
     });
   });
@@ -2428,7 +2463,8 @@ function render(){
   else if(activeTab==='invoice') renderInvoice(container);
 }
 
-loadState();
+render();      // draw the UI shell immediately, don't wait on the network
+loadState();   // then fetch real data in the background and re-render
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('sw.js').catch(err=>console.log('SW registration failed', err));
