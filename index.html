@@ -153,6 +153,19 @@
   .invoice-total-row span:last-child{font-family:'JetBrains Mono',monospace;font-size:22px;}
   .select-all-row{padding:12px 16px;display:flex;align-items:center;gap:10px;}
   .select-all-row label{font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--parchment);cursor:pointer;}
+  .history-toolbar-btn{font-size:12px;}
+  .history-toolbar-btn.active{background:var(--blaze-yellow);color:#fff;border-color:var(--blaze-yellow);}
+  .active-filter-chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:7px 12px;border-radius:20px;background:var(--parchment-dim);color:var(--ink);margin-bottom:14px;cursor:pointer;}
+  .invoice-card-head{display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;}
+  .invoice-card-head .invoice-card-info{flex:1;min-width:0;}
+  .invoice-card-head .invoice-card-top{font-size:13px;font-weight:600;color:var(--ink);}
+  .invoice-card-head .invoice-card-meta{font-size:11px;color:var(--ink-dim);margin-top:2px;}
+  .invoice-card-price{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:15px;color:var(--ink);}
+  .paid-badge{font-size:10px;text-transform:uppercase;letter-spacing:0.05em;padding:3px 8px;border-radius:20px;font-weight:700;white-space:nowrap;}
+  .paid-badge.paid{background:#cfe3d4;color:#2f4d38;}
+  .paid-badge.unpaid{background:#f3d9d4;color:#7a3626;}
+  .paid-toggle-row{display:flex;align-items:center;gap:10px;padding:10px 16px;border-top:1px solid var(--parchment-dim);}
+  .paid-toggle-row label{font-size:12px;color:var(--ink-dim);cursor:pointer;}
   .walk-stats{display:flex;gap:18px;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:700;margin-top:14px;color:var(--ink);}
   .walk-stats span{display:block;font-family:'Inter',sans-serif;font-weight:400;font-size:10px;color:var(--ink-dim);text-transform:uppercase;}
   .note{font-size:13px;color:var(--ink-dim);margin-top:6px;font-style:italic;}
@@ -217,8 +230,7 @@
     <button class="tab active" data-tab="track">Track</button>
     <button class="tab" data-tab="dogs">Dogs</button>
     <button class="tab" data-tab="history">History</button>
-    <button class="tab" data-tab="stats">Stats</button>
-    <button class="tab" data-tab="invoice">Invoice</button>
+    <button class="tab" data-tab="invoice">Invoices</button>
   </div>
 
   <div id="content"></div>
@@ -227,7 +239,7 @@
 <script>
 const COLORS = ['#e8b23e','#3e7ca6','#c1502e','#6b8e4e','#8c5fa3','#4e8c82','#b06b3e','#4e6ab0'];
 
-let state = { dogs: [], walks: [], daycare: [], boarding: [] };
+let state = { dogs: [], walks: [], daycare: [], boarding: [], invoices: [] };
 let activeTab = 'track';
 let timerRunning = false;
 let timerStart = null;
@@ -236,6 +248,8 @@ let elapsedMs = 0;
 let reviewing = false; // showing the review screen — tracking keeps running until Save/Discard
 let selectedDogIds = [];
 let historyFilter = 'all';
+let historyTypeFilter = 'all';   // 'all' | 'walk' | 'daycare' | 'boarding'
+let historyPanel = null;         // null | 'filter' | 'stats' | 'invoice'
 let expandedWalks = new Set();
 let editingWalkId = null;
 let editDraft = { pee:0, poop:0, note:'' };
@@ -244,8 +258,8 @@ let editingRoutePoints = [];
 let editRouteMap = null, editRoutePolyline = null, editRouteMarkers = [];
 let editingCareId = null;   // id of daycare/boarding record being time-edited
 let invoiceSelection = new Set();
-let invoiceFilter = 'all';
 let invoicePrices = {};
+let invoiceViewOpen = null;   // id of a saved invoice currently expanded in the Invoices tab
 let peeCount = 0;
 let poopCount = 0;
 let draftDistance = '';
@@ -610,6 +624,7 @@ async function loadState(){
   state.walks = await migrateLocalIfEmpty('walks', 'pack-trail-walks');
   state.daycare = await migrateLocalIfEmpty('daycare', 'pack-trail-daycare');
   state.boarding = await migrateLocalIfEmpty('boarding', 'pack-trail-boarding');
+  state.invoices = await migrateLocalIfEmpty('invoices', 'pack-trail-invoices');
   try{
     const snap = await docRef('activeWalk').get();
     recoveredWalk = snap.exists ? snap.data() : null;
@@ -632,6 +647,10 @@ async function saveDaycare(){
 async function saveBoarding(){
   try{ await docRef('boarding').set({ items: state.boarding }); }
   catch(e){ console.error('save boarding failed', e); }
+}
+async function saveInvoices(){
+  try{ await docRef('invoices').set({ items: state.invoices }); }
+  catch(e){ console.error('save invoices failed', e); }
 }
 
 // ---- Crash/close recovery for an in-progress walk ----
@@ -1835,6 +1854,62 @@ function toggleInvoiceSelect(id){
   render();
 }
 
+function createInvoiceFromSelection(){
+  const everything = getInvoiceableRecords();
+  const selected = everything.filter(x=>invoiceSelection.has(x.id));
+  if(selected.length===0) return;
+
+  const dogNameSet = new Set();
+  const items = selected.map(({type, id, record})=>{
+    record.dogIds.forEach(did=>{ const dog=dogById(did); dogNameSet.add(dog?dog.name:'Unknown'); });
+    const price = parseFloat(invoicePrices[id]) || 0;
+    record.price = invoicePrices[id]==='' ? null : price;
+    return {
+      type,
+      recordId: id,
+      date: invRecordDate(type, record).toISOString(),
+      durationLabel: invRecordDurationLabel(type, record),
+      price
+    };
+  });
+  const total = items.reduce((a,it)=>a+it.price, 0);
+  const invoice = {
+    id: 'inv_'+Date.now(),
+    createdAt: new Date().toISOString(),
+    dogNames: Array.from(dogNameSet).join(' & '),
+    items,
+    total,
+    paid: false
+  };
+  state.invoices.unshift(invoice);
+
+  const touchedTypes = new Set(selected.map(x=>x.type));
+  touchedTypes.forEach(t=> invRecordSave(t)());
+
+  invoiceSelection = new Set();
+  invoicePrices = {};
+  historyPanel = null;
+  render();
+  saveInvoices();
+}
+
+function toggleInvoicePaid(id){
+  const inv = state.invoices.find(i=>i.id===id);
+  if(!inv) return;
+  const next = !inv.paid;
+  if(!confirm(next ? 'Mark this invoice as paid?' : 'Mark this invoice as unpaid?')) return;
+  inv.paid = next;
+  render();
+  saveInvoices();
+}
+
+function deleteInvoice(id){
+  if(!confirm("Delete this invoice record? This can't be undone.")) return;
+  state.invoices = state.invoices.filter(i=>i.id!==id);
+  render();
+  saveInvoices();
+}
+
 function updateInvoiceTotalDisplay(){
   const selected = getInvoiceableRecords().filter(x=>invoiceSelection.has(x.id));
   let total = 0;
@@ -1848,11 +1923,11 @@ function updateInvoiceTotalDisplay(){
   if(totalEl) totalEl.textContent = '$'+total.toFixed(2);
 }
 
-async function buildInvoiceSnapshot(items){
+async function buildInvoiceSnapshotRows(titleDogs, rows){
   try{ await document.fonts.ready; }catch(e){}
   const W = 640, padding = 32, contentW = W - padding*2;
   const rowH = 50;
-  let H = padding + 34 + 44 + 34 + items.length*rowH + 24 + 46 + padding;
+  let H = padding + 34 + 44 + 34 + rows.length*rowH + 24 + 46 + padding;
   const scale = 2;
   const canvas = document.createElement('canvas');
   canvas.width = W*scale; canvas.height = H*scale;
@@ -1862,15 +1937,6 @@ async function buildInvoiceSnapshot(items){
 
   ctx.fillStyle = '#ece4cc';
   roundRectPath(ctx,0,0,W,H,0); ctx.fill();
-
-  const dogNameSet = new Set();
-  items.forEach(({type, record})=>{
-    record.dogIds.forEach(id=>{
-      const dog = dogById(id);
-      dogNameSet.add(dog ? dog.name : 'Unknown');
-    });
-  });
-  const titleDogs = Array.from(dogNameSet).join(' & ');
 
   let y = padding;
   ctx.fillStyle = '#6a634c';
@@ -1900,22 +1966,18 @@ async function buildInvoiceSnapshot(items){
   y += 14;
 
   let total = 0;
-  items.forEach(({type, record, price})=>{
-    const d = invRecordDate(type, record);
-    const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
-    const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-
+  rows.forEach(({dateStr, timeStr, typeLabel, durationLabel, price})=>{
     ctx.font = '500 14px Inter, sans-serif';
     ctx.fillStyle = '#211f14';
     ctx.fillText(dateStr, padding, y);
     ctx.font = '500 13px Inter, sans-serif';
     ctx.fillStyle = '#6a634c';
-    ctx.fillText(invRecordTypeLabel(type), padding+110, y+1);
+    ctx.fillText(typeLabel, padding+110, y+1);
     ctx.font = '500 14px Inter, sans-serif';
     ctx.fillStyle = '#211f14';
     ctx.fillText(timeStr, padding+210, y);
     ctx.font = '600 13px "JetBrains Mono", monospace';
-    ctx.fillText(invRecordDurationLabel(type, record), padding+330, y);
+    ctx.fillText(durationLabel, padding+330, y);
     ctx.font = '700 15px "JetBrains Mono", monospace';
     ctx.fillText('$'+price.toFixed(2), padding+contentW-60, y);
     total += price;
@@ -1934,10 +1996,54 @@ async function buildInvoiceSnapshot(items){
   return new Promise(resolve => canvas.toBlob(blob=>resolve(blob), 'image/png'));
 }
 
-function buildVenmoLink(items){
-  const total = items.reduce((a,{price})=>a+price, 0);
-  const totalStr = total.toFixed(2);
+async function buildInvoiceSnapshot(items){
+  const dogNameSet = new Set();
+  items.forEach(({record})=>{
+    record.dogIds.forEach(id=>{
+      const dog = dogById(id);
+      dogNameSet.add(dog ? dog.name : 'Unknown');
+    });
+  });
+  const titleDogs = Array.from(dogNameSet).join(' & ');
+  const rows = items.map(({type, record, price})=>{
+    const d = invRecordDate(type, record);
+    return {
+      dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}),
+      timeStr: d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}),
+      typeLabel: invRecordTypeLabel(type),
+      durationLabel: invRecordDurationLabel(type, record),
+      price
+    };
+  });
+  return buildInvoiceSnapshotRows(titleDogs, rows);
+}
 
+async function buildSavedInvoiceSnapshot(invoice){
+  const rows = invoice.items.map(it=>{
+    const d = new Date(it.date);
+    return {
+      dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}),
+      timeStr: d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'}),
+      typeLabel: invRecordTypeLabel(it.type),
+      durationLabel: it.durationLabel,
+      price: it.price
+    };
+  });
+  return buildInvoiceSnapshotRows(invoice.dogNames, rows);
+}
+
+function buildVenmoLinkRaw(dogNames, dates, total){
+  const totalStr = total.toFixed(2);
+  const sorted = dates.slice().sort((a,b)=>a-b);
+  const fmtShort = d => d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+  const minStr = fmtShort(sorted[0]);
+  const maxStr = fmtShort(sorted[sorted.length-1]);
+  const dateRange = minStr===maxStr ? minStr : `${minStr}-${maxStr}`;
+  const note = `${dogNames} ${dateRange}`.trim().replace(/\s+/g, '+');
+  return `https://venmo.com/tjrichert?txn=pay&amount=${totalStr}&note=${note}`;
+}
+
+function buildVenmoLink(items){
   const dogNameSet = new Set();
   items.forEach(({record})=>{
     record.dogIds.forEach(id=>{
@@ -1946,85 +2052,225 @@ function buildVenmoLink(items){
     });
   });
   const dogNames = Array.from(dogNameSet).join(' & ');
+  const dates = items.map(({type, record})=> invRecordDate(type, record));
+  const total = items.reduce((a,{price})=>a+price, 0);
+  return buildVenmoLinkRaw(dogNames, dates, total);
+}
 
-  const dates = items.map(({type, record})=> invRecordDate(type, record)).sort((a,b)=>a-b);
-  const fmtShort = d => d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
-  const minStr = fmtShort(dates[0]);
-  const maxStr = fmtShort(dates[dates.length-1]);
-  const dateRange = minStr===maxStr ? minStr : `${minStr}-${maxStr}`;
+function buildVenmoLinkSaved(invoice){
+  const dates = invoice.items.map(it=> new Date(it.date));
+  return buildVenmoLinkRaw(invoice.dogNames, dates, invoice.total);
+}
 
-  const note = `${dogNames} ${dateRange}`.trim().replace(/\s+/g, '+');
-  return `https://venmo.com/tjrichert?txn=pay&amount=${totalStr}&note=${note}`;
+async function shareInvoiceBlob(blob, venmoLink){
+  if(!blob) return;
+  const file = new File([blob], 'invoice.png', {type:'image/png'});
+  const text = `Pay with Zelle: 651-269-9107\nPay with Venmo: ${venmoLink}`;
+  if(navigator.canShare && navigator.canShare({files:[file]})){
+    await navigator.share({ files:[file], title:'PackTrax invoice', text });
+  } else if(navigator.share){
+    try{ await navigator.share({ title:'PackTrax invoice', text }); }
+    catch(e){ downloadBlob(blob, 'invoice.png'); }
+  } else {
+    downloadBlob(blob, 'invoice.png');
+  }
 }
 
 async function shareInvoice(items){
   try{
     const blob = await buildInvoiceSnapshot(items);
-    if(!blob) return;
     const venmoLink = buildVenmoLink(items);
-    const file = new File([blob], 'invoice.png', {type:'image/png'});
-    const text = `Pay with Zelle: 651-269-9107\nPay with Venmo: ${venmoLink}`;
-    if(navigator.canShare && navigator.canShare({files:[file]})){
-      await navigator.share({ files:[file], title:'PackTrax invoice', text });
-    } else if(navigator.share){
-      try{ await navigator.share({ title:'PackTrax invoice', text }); }
-      catch(e){ downloadBlob(blob, 'invoice.png'); }
-    } else {
-      downloadBlob(blob, 'invoice.png');
-    }
+    await shareInvoiceBlob(blob, venmoLink);
   }catch(e){
     if(e.name !== 'AbortError') console.error('invoice share failed', e);
   }
 }
 
-function renderInvoice(container){
-  const everything = getInvoiceableRecords();
-  if(everything.length===0){
-    container.innerHTML = `<div class="card"><div class="empty"><div class="empty-title">Nothing to invoice yet</div>Log a walk, or check a dog into daycare or boarding, then come back to build an invoice.</div></div>`;
+async function shareSavedInvoice(invoice){
+  try{
+    const blob = await buildSavedInvoiceSnapshot(invoice);
+    const venmoLink = buildVenmoLinkSaved(invoice);
+    await shareInvoiceBlob(blob, venmoLink);
+  }catch(e){
+    if(e.name !== 'AbortError') console.error('invoice share failed', e);
+  }
+}
+
+function renderInvoicesTab(container){
+  if(state.invoices.length===0){
+    container.innerHTML = `<div class="card"><div class="empty"><div class="empty-title">No invoices yet</div>Head to the History tab and tap "🧾 Invoice" to select walks, daycare, or boarding to bill, then generate one.</div></div>`;
     return;
   }
 
-  let html = `<div class="filter-row">`;
-  html += `<div class="chip ${invoiceFilter==='all'?'selected':''}" style="background:${invoiceFilter==='all'?'var(--blaze-yellow)':'var(--panel-2)'};color:${invoiceFilter==='all'?'#fff':'var(--parchment)'}" data-invfilter="all">All dogs</div>`;
-  state.dogs.forEach(d=>{
-    const sel = invoiceFilter===d.id;
-    html += `<div class="chip" style="background:${sel?d.color:'var(--panel-2)'};color:${sel?'#fff':'var(--parchment)'}" data-invfilter="${d.id}">${d.name}</div>`;
+  const sorted = state.invoices.slice().sort((a,b)=> new Date(b.createdAt) - new Date(a.createdAt));
+  let html = '';
+  sorted.forEach(inv=>{
+    const created = new Date(inv.createdAt);
+    const createdStr = created.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+    const isOpen = invoiceViewOpen === inv.id;
+    html += `<div class="walk-card">
+      <div class="invoice-card-head" data-invtoggle="${inv.id}">
+        <span class="paw-icon">🧾</span>
+        <div class="invoice-card-info">
+          <div class="invoice-card-top">${inv.dogNames || '(no dogs)'}</div>
+          <div class="invoice-card-meta">${createdStr} · ${inv.items.length} item${inv.items.length!==1?'s':''}</div>
+        </div>
+        <div class="invoice-card-price">$${inv.total.toFixed(2)}</div>
+        <span class="paid-badge ${inv.paid?'paid':'unpaid'}">${inv.paid?'Paid':'Unpaid'}</span>
+        <div class="card-actions">
+          <button class="icon-btn" data-share-invoice="${inv.id}" title="Share">📤</button>
+          <button class="icon-btn danger" data-delete-invoice="${inv.id}" title="Delete">🗑️</button>
+        </div>
+      </div>`;
+    if(isOpen){
+      html += `<div class="walk-card-body">`;
+      inv.items.forEach(it=>{
+        const d = new Date(it.date);
+        const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
+        html += `<div class="invoice-line">
+          <div>${dateStr} · ${invRecordTypeLabel(it.type)} · ${it.durationLabel}</div>
+          <div class="invoice-line-price">$${it.price.toFixed(2)}</div>
+        </div>`;
+      });
+      html += `<div class="invoice-total-row"><span>Total</span><span>$${inv.total.toFixed(2)}</span></div>
+      </div>
+      <div class="paid-toggle-row">
+        <input type="checkbox" id="paidCheck_${inv.id}" data-paidtoggle="${inv.id}" ${inv.paid?'checked':''}>
+        <label for="paidCheck_${inv.id}">Mark as ${inv.paid?'unpaid':'paid'}</label>
+      </div>`;
+    }
+    html += `</div>`;
   });
-  html += `</div>`;
+
+  container.innerHTML = html;
+
+  container.querySelectorAll('[data-invtoggle]').forEach(h=>h.addEventListener('click', e=>{
+    if(e.target.closest('.card-actions')) return;
+    const id = h.dataset.invtoggle;
+    invoiceViewOpen = (invoiceViewOpen===id) ? null : id;
+    render();
+  }));
+  container.querySelectorAll('[data-share-invoice]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    const inv = state.invoices.find(i=>i.id===b.dataset.shareInvoice);
+    if(inv) shareSavedInvoice(inv);
+  }));
+  container.querySelectorAll('[data-delete-invoice]').forEach(b=>b.addEventListener('click', e=>{
+    e.stopPropagation();
+    deleteInvoice(b.dataset.deleteInvoice);
+  }));
+  container.querySelectorAll('[data-paidtoggle]').forEach(cb=>cb.addEventListener('click', e=>{
+    e.stopPropagation();
+    e.preventDefault();
+    toggleInvoicePaid(cb.dataset.paidtoggle);
+  }));
+}
+
+function renderHistoryStatsHtml(){
+  const recs = getInvoiceableRecords().filter(x=>
+    (historyTypeFilter==='all' || x.type===historyTypeFilter) &&
+    (historyFilter==='all' || x.record.dogIds.includes(historyFilter))
+  );
+  const walkRecs = recs.filter(x=>x.type==='walk').map(x=>x.record);
+
+  const totalCount = recs.length;
+  const totalMs = recs.reduce((a,x)=> a + (invRecordDurationMs(x.type,x.record)||0), 0);
+  const totalDist = walkRecs.reduce((a,w)=>a+(w.distance||0),0);
+  const totalPee = walkRecs.reduce((a,w)=>a+(w.pee||0),0);
+  const totalPoop = walkRecs.reduce((a,w)=>a+(w.poop||0),0);
+
+  const dogLabel = historyFilter==='all' ? 'All dogs' : (dogById(historyFilter) ? dogById(historyFilter).name : '(removed dog)');
+  const typeLabel = historyTypeFilter==='all' ? 'all tasks' : invRecordTypeLabel(historyTypeFilter).toLowerCase()+'s';
+
+  let html = `<div class="card"><div style="font-size:12px;color:var(--ink-dim);">Showing stats for: <strong style="color:var(--ink);">${dogLabel}</strong> · ${typeLabel}</div></div>`;
+
+  if(totalCount===0){
+    html += `<div class="card"><div class="empty" style="color:var(--ink-dim);">No records match this selection yet.</div></div>`;
+  } else {
+    html += `<div class="card dark pack-total">
+      <div><div class="n">${totalCount}</div><div class="l">Entries</div></div>
+      <div><div class="n">${fmtTime(totalMs)}</div><div class="l">Time</div></div>
+      <div><div class="n">${totalDist.toFixed(1)}</div><div class="l">Miles</div></div>
+    </div>
+    <div class="card dark pack-total">
+      <div><div class="n">💧 ${totalPee}</div><div class="l">Pees</div></div>
+      <div><div class="n">💩 ${totalPoop}</div><div class="l">Poops</div></div>
+    </div>`;
+
+    if(historyFilter==='all' && state.dogs.length>0){
+      state.dogs.forEach(d=>{
+        const dRecs = recs.filter(x=>x.record.dogIds.includes(d.id));
+        if(dRecs.length===0) return;
+        const dWalks = dRecs.filter(x=>x.type==='walk').map(x=>x.record);
+        const ms = dRecs.reduce((a,x)=>a+(invRecordDurationMs(x.type,x.record)||0),0);
+        const dist = dWalks.reduce((a,w)=>a+(w.distance||0),0);
+        const pee = dWalks.reduce((a,w)=>a+(w.pee||0),0);
+        const poop = dWalks.reduce((a,w)=>a+(w.poop||0),0);
+        html += `<div class="card stat-card">
+          <div class="dot" style="background:${d.color};width:18px;height:18px;"></div>
+          <div>
+            <div class="dog-name">${d.name}</div>
+            <div class="dog-meta">💧${pee} 💩${poop}</div>
+          </div>
+          <div class="stat-nums">
+            <div><div class="stat-num">${dRecs.length}</div><div class="stat-label">Entries</div></div>
+            <div><div class="stat-num">${fmtTime(ms)}</div><div class="stat-label">Time</div></div>
+            <div><div class="stat-num">${dist.toFixed(1)}</div><div class="stat-label">Miles</div></div>
+          </div>
+        </div>`;
+      });
+    }
+  }
+
+  html += `<button class="btn-ghost" id="historyStatsDoneBtn" style="width:100%;margin-top:4px;">← Back to history</button>`;
+  return html;
+}
+
+function renderHistoryInvoiceHtml(){
+  const everything = getInvoiceableRecords();
+  if(everything.length===0){
+    return `<div class="card"><div class="empty"><div class="empty-title">Nothing to invoice yet</div>Log a walk, or check a dog into daycare or boarding, then come back.</div></div>
+    <button class="btn-ghost" id="historyInvoiceDoneBtn" style="width:100%;margin-top:10px;">← Back to history</button>`;
+  }
 
   const items = everything
-    .filter(x => invoiceFilter==='all' || x.record.dogIds.includes(invoiceFilter))
+    .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter))
     .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
-  const allSelected = items.length>0 && items.every(x=>invoiceSelection.has(x.id));
 
-  html += `<div class="card dark select-all-row">
-    <input type="checkbox" id="selectAllInv" ${allSelected?'checked':''}>
-    <label for="selectAllInv">Select all (${items.length} item${items.length!==1?'s':''})</label>
-  </div>`;
-
-  html += `<div class="card" style="padding:2px 0;">`;
-  items.forEach(({type, id, record})=>{
-    const d = invRecordDate(type, record);
-    const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
-    const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
-    const dogNames = record.dogIds.map(did=>{ const dog=dogById(did); return dog?dog.name:'(removed dog)'; }).join(', ');
-    const isSelected = invoiceSelection.has(id);
-    if(invoicePrices[id]===undefined) invoicePrices[id] = (record.price!=null ? String(record.price) : String(invDefaultPrice(type)));
-    const metaBits = [dogNames, invRecordTypeLabel(type), invRecordDurationLabel(type, record)];
-    if(type==='walk' && record.distance) metaBits.push(record.distance+' mi');
-    html += `<div class="invoice-row ${isSelected?'selected':''}">
-      <input type="checkbox" data-invcheck="${id}" ${isSelected?'checked':''}>
-      <div class="invoice-row-info">
-        <div class="invoice-row-top">${dateStr} <span style="color:var(--ink-dim);font-weight:400;">· ${timeStr}</span></div>
-        <div class="invoice-row-meta">${metaBits.join(' · ')}</div>
-      </div>
-      <div class="invoice-price-field">
-        <span>$</span>
-        <input type="number" step="0.01" min="0" placeholder="0.00" data-invprice="${id}" value="${invoicePrices[id]}">
-      </div>
+  let html = '';
+  if(items.length===0){
+    html += `<div class="card"><div class="empty" style="color:var(--ink-dim);">No records match the current filter.</div></div>`;
+  } else {
+    const allSelected = items.every(x=>invoiceSelection.has(x.id));
+    html += `<div class="card dark select-all-row">
+      <input type="checkbox" id="selectAllInv" ${allSelected?'checked':''}>
+      <label for="selectAllInv">Select all (${items.length} item${items.length!==1?'s':''})</label>
     </div>`;
-  });
-  html += `</div>`;
+
+    html += `<div class="card" style="padding:2px 0;">`;
+    items.forEach(({type, id, record})=>{
+      const d = invRecordDate(type, record);
+      const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
+      const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
+      const dogNames = record.dogIds.map(did=>{ const dog=dogById(did); return dog?dog.name:'(removed dog)'; }).join(', ');
+      const isSelected = invoiceSelection.has(id);
+      if(invoicePrices[id]===undefined) invoicePrices[id] = (record.price!=null ? String(record.price) : String(invDefaultPrice(type)));
+      const metaBits = [dogNames, invRecordTypeLabel(type), invRecordDurationLabel(type, record)];
+      if(type==='walk' && record.distance) metaBits.push(record.distance+' mi');
+      html += `<div class="invoice-row ${isSelected?'selected':''}">
+        <input type="checkbox" data-invcheck="${id}" ${isSelected?'checked':''}>
+        <div class="invoice-row-info">
+          <div class="invoice-row-top">${dateStr} <span style="color:var(--ink-dim);font-weight:400;">· ${timeStr}</span></div>
+          <div class="invoice-row-meta">${metaBits.join(' · ')}</div>
+        </div>
+        <div class="invoice-price-field">
+          <span>$</span>
+          <input type="number" step="0.01" min="0" placeholder="0.00" data-invprice="${id}" value="${invoicePrices[id]}">
+        </div>
+      </div>`;
+    });
+    html += `</div>`;
+  }
 
   const selectedItems = items.filter(x=>invoiceSelection.has(x.id));
   if(selectedItems.length>0){
@@ -2041,73 +2287,68 @@ function renderInvoice(container){
       </div>`;
     });
     html += `<div class="invoice-total-row"><span>Total</span><span id="invoiceTotalVal">$${total.toFixed(2)}</span></div>
-      <button class="btn-primary" id="shareInvoiceBtn" style="margin-top:16px;">📤 Share invoice</button>
-      <div class="geo-status" style="margin-top:8px;">Includes "Pay by Venmo" and "Pay by Zelle" details in the message</div>
+      <button class="btn-primary" id="generateInvoiceBtn" style="margin-top:16px;">🧾 Generate & share invoice</button>
+      <div class="geo-status" style="margin-top:8px;">Saves to the Invoices tab and includes "Pay by Venmo" and "Pay by Zelle" details</div>
     </div>`;
   }
 
-  container.innerHTML = html;
-
-  container.querySelectorAll('[data-invfilter]').forEach(c=>c.addEventListener('click', ()=>{ invoiceFilter=c.dataset.invfilter; render(); }));
-
-  const selectAll = container.querySelector('#selectAllInv');
-  if(selectAll) selectAll.addEventListener('change', e=>{
-    if(e.target.checked) items.forEach(x=>invoiceSelection.add(x.id));
-    else items.forEach(x=>invoiceSelection.delete(x.id));
-    render();
-  });
-
-  container.querySelectorAll('[data-invcheck]').forEach(cb=>cb.addEventListener('change', e=>{
-    toggleInvoiceSelect(e.target.dataset.invcheck);
-  }));
-
-  container.querySelectorAll('[data-invprice]').forEach(inp=>{
-    inp.addEventListener('input', e=>{
-      invoicePrices[e.target.dataset.invprice] = e.target.value;
-      updateInvoiceTotalDisplay();
-    });
-    inp.addEventListener('change', e=>{
-      const id = e.target.dataset.invprice;
-      const match = items.find(x=>x.id===id);
-      if(match){
-        match.record.price = e.target.value===''? null : parseFloat(e.target.value);
-        invRecordSave(match.type)();
-      }
-    });
-  });
-
-  const shareBtn = container.querySelector('#shareInvoiceBtn');
-  if(shareBtn) shareBtn.addEventListener('click', ()=>{
-    const shareItems = selectedItems.map(({type, record, id})=>({ type, record, price: parseFloat(invoicePrices[id])||0 }));
-    shareInvoice(shareItems);
-  });
+  html += `<button class="btn-ghost" id="historyInvoiceDoneBtn" style="width:100%;margin-top:10px;">← Back to history</button>`;
+  return html;
 }
 
 function renderHistory(container){
-  let html = `<div class="filter-row">`;
-  html += `<div class="chip ${historyFilter==='all'?'selected':''}" style="background:${historyFilter==='all'?'var(--blaze-yellow)':'var(--panel-2)'};color:${historyFilter==='all'?'#fff':'var(--parchment)'}" data-filter="all">All dogs</div>`;
-  state.dogs.forEach(d=>{
-    const sel = historyFilter===d.id;
-    html += `<div class="chip" style="background:${sel?d.color:'var(--panel-2)'};color:${sel?'#fff':'var(--parchment)'}" data-filter="${d.id}">${d.name}</div>`;
-  });
-  html += `</div>`;
+  let html = `<div class="row3" style="margin-bottom:14px;">
+    <button class="btn-ghost history-toolbar-btn ${historyPanel==='filter'?'active':''}" id="historyFilterBtn">🔍 Filter</button>
+    <button class="btn-ghost history-toolbar-btn ${historyPanel==='stats'?'active':''}" id="historyStatsBtn">📊 Stats</button>
+    <button class="btn-ghost history-toolbar-btn ${historyPanel==='invoice'?'active':''}" id="historyInvoiceBtn">🧾 Invoice</button>
+  </div>`;
 
-  const walks = state.walks.filter(w => historyFilter==='all' || w.dogIds.includes(historyFilter));
-  const daycareItems = state.daycare.filter(s => historyFilter==='all' || s.dogIds.includes(historyFilter));
-  const boardingItems = state.boarding.filter(s => historyFilter==='all' || s.dogIds.includes(historyFilter));
+  if(historyPanel!=='filter' && (historyFilter!=='all' || historyTypeFilter!=='all')){
+    const dogLabel = historyFilter==='all' ? null : (dogById(historyFilter) ? dogById(historyFilter).name : '(removed dog)');
+    const typeLabel = historyTypeFilter==='all' ? null : invRecordTypeLabel(historyTypeFilter)+'s';
+    const parts = [dogLabel, typeLabel].filter(Boolean);
+    html += `<div class="active-filter-chip" id="clearHistoryFilterChip">Filtering: ${parts.join(' · ')} ✕</div>`;
+  }
+
+  if(historyPanel==='filter'){
+    html += `<div class="card">
+      <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Filter by dog</label>
+      <div class="dog-picker" style="margin-top:8px;">`;
+    html += `<div class="chip ${historyFilter==='all'?'selected':''}" style="background:${historyFilter==='all'?'var(--blaze-yellow)':'var(--parchment-dim)'};color:${historyFilter==='all'?'#fff':'var(--ink)'}" data-hfilter-dog="all">All dogs</div>`;
+    state.dogs.forEach(d=>{
+      const sel = historyFilter===d.id;
+      html += `<div class="chip ${sel?'selected':''}" style="background:${sel?d.color:'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-hfilter-dog="${d.id}">${d.name}</div>`;
+    });
+    html += `</div>
+      <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);margin-top:14px;display:block;">Filter by task</label>
+      <div class="dog-picker" style="margin-top:8px;">`;
+    [['all','All types'],['walk','Walks'],['daycare','Daycare'],['boarding','Boarding']].forEach(([val,label])=>{
+      const sel = historyTypeFilter===val;
+      html += `<div class="chip ${sel?'selected':''}" style="background:${sel?'var(--blaze-blue)':'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-hfilter-type="${val}">${label}</div>`;
+    });
+    html += `</div>
+      <button class="btn-ghost" id="historyFilterDoneBtn" style="margin-top:14px;width:100%;">Done</button>
+    </div>`;
+  }
+
+  const walks = state.walks.filter(w => (historyFilter==='all' || w.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='walk'));
+  const daycareItems = state.daycare.filter(s => (historyFilter==='all' || s.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='daycare'));
+  const boardingItems = state.boarding.filter(s => (historyFilter==='all' || s.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='boarding'));
   const combined = [
     ...walks.map(w => ({ type:'walk', sortDate:w.date, data:w })),
     ...daycareItems.map(s => ({ type:'daycare', sortDate:s.checkInAt, data:s })),
     ...boardingItems.map(s => ({ type:'boarding', sortDate:s.checkInAt, data:s }))
   ].sort((a,b)=> new Date(b.sortDate) - new Date(a.sortDate));
 
-  if(combined.length===0){
+  if(historyPanel==='stats'){
+    html += renderHistoryStatsHtml();
+  } else if(historyPanel==='invoice'){
+    html += renderHistoryInvoiceHtml();
+  } else if(combined.length===0){
     html += `<div class="empty"><div class="empty-title">Nothing here yet</div>Log a walk, daycare visit, or boarding stay from the Track tab and it'll show up here.</div>`;
-    container.innerHTML = html;
-    container.querySelectorAll('[data-filter]').forEach(c=>c.addEventListener('click', ()=>{ historyFilter=c.dataset.filter; render(); }));
-    return;
   }
 
+  if(historyPanel!=='stats' && historyPanel!=='invoice'){
   combined.forEach(item=>{
     if(item.type==='daycare'){
       const s = item.data;
@@ -2298,8 +2539,56 @@ function renderHistory(container){
     }
     html += `</div>`;
   });
+  }
   container.innerHTML = html;
-  container.querySelectorAll('[data-filter]').forEach(c=>c.addEventListener('click', ()=>{ historyFilter=c.dataset.filter; render(); }));
+
+  const fBtn = container.querySelector('#historyFilterBtn');
+  if(fBtn) fBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='filter' ? null : 'filter'; render(); });
+  const sBtn = container.querySelector('#historyStatsBtn');
+  if(sBtn) sBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='stats' ? null : 'stats'; render(); });
+  const iBtn = container.querySelector('#historyInvoiceBtn');
+  if(iBtn) iBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='invoice' ? null : 'invoice'; invoiceSelection = new Set(); invoicePrices = {}; render(); });
+  const clearChip = container.querySelector('#clearHistoryFilterChip');
+  if(clearChip) clearChip.addEventListener('click', ()=>{ historyFilter='all'; historyTypeFilter='all'; render(); });
+
+  container.querySelectorAll('[data-hfilter-dog]').forEach(c=>c.addEventListener('click', ()=>{ historyFilter=c.dataset.hfilterDog; render(); }));
+  container.querySelectorAll('[data-hfilter-type]').forEach(c=>c.addEventListener('click', ()=>{ historyTypeFilter=c.dataset.hfilterType; render(); }));
+  const filterDoneBtn = container.querySelector('#historyFilterDoneBtn');
+  if(filterDoneBtn) filterDoneBtn.addEventListener('click', ()=>{ historyPanel=null; render(); });
+
+  const statsDoneBtn = container.querySelector('#historyStatsDoneBtn');
+  if(statsDoneBtn) statsDoneBtn.addEventListener('click', ()=>{ historyPanel=null; render(); });
+
+  const invItems = getInvoiceableRecords()
+    .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter))
+    .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
+  const selectAllInv = container.querySelector('#selectAllInv');
+  if(selectAllInv) selectAllInv.addEventListener('change', e=>{
+    if(e.target.checked) invItems.forEach(x=>invoiceSelection.add(x.id));
+    else invItems.forEach(x=>invoiceSelection.delete(x.id));
+    render();
+  });
+  container.querySelectorAll('[data-invcheck]').forEach(cb=>cb.addEventListener('change', e=>{
+    toggleInvoiceSelect(e.target.dataset.invcheck);
+  }));
+  container.querySelectorAll('[data-invprice]').forEach(inp=>{
+    inp.addEventListener('input', e=>{
+      invoicePrices[e.target.dataset.invprice] = e.target.value;
+      updateInvoiceTotalDisplay();
+    });
+    inp.addEventListener('change', e=>{
+      const id = e.target.dataset.invprice;
+      const match = invItems.find(x=>x.id===id);
+      if(match){
+        match.record.price = e.target.value===''? null : parseFloat(e.target.value);
+      }
+    });
+  });
+  const generateBtn = container.querySelector('#generateInvoiceBtn');
+  if(generateBtn) generateBtn.addEventListener('click', ()=>{ createInvoiceFromSelection(); });
+  const invDoneBtn = container.querySelector('#historyInvoiceDoneBtn');
+  if(invDoneBtn) invDoneBtn.addEventListener('click', ()=>{ historyPanel=null; render(); });
+
   container.querySelectorAll('[data-toggle]').forEach(h=>h.addEventListener('click', ()=>{
     const id = h.dataset.toggle;
     if(expandedWalks.has(id)) expandedWalks.delete(id);
@@ -2410,57 +2699,12 @@ function escapeHtml(s){
   return div.innerHTML;
 }
 
-function renderStats(container){
-  const totalWalks = state.walks.length;
-  const totalMs = state.walks.reduce((a,w)=>a+w.durationMs,0);
-  const totalDist = state.walks.reduce((a,w)=>a+(w.distance||0),0);
-  const totalPee = state.walks.reduce((a,w)=>a+(w.pee||0),0);
-  const totalPoop = state.walks.reduce((a,w)=>a+(w.poop||0),0);
-
-  let html = `<div class="card dark pack-total">
-    <div><div class="n">${totalWalks}</div><div class="l">Walks</div></div>
-    <div><div class="n">${fmtTime(totalMs)}</div><div class="l">Time out</div></div>
-    <div><div class="n">${totalDist.toFixed(1)}</div><div class="l">Miles</div></div>
-  </div>
-  <div class="card dark pack-total">
-    <div><div class="n">💧 ${totalPee}</div><div class="l">Pees</div></div>
-    <div><div class="n">💩 ${totalPoop}</div><div class="l">Poops</div></div>
-  </div>`;
-
-  if(state.dogs.length===0){
-    html += `<div class="card"><div class="empty" style="color:var(--ink-dim);">Add dogs to see individual stats.</div></div>`;
-  } else {
-    state.dogs.forEach(d=>{
-      const dw = state.walks.filter(w=>w.dogIds.includes(d.id));
-      const ms = dw.reduce((a,w)=>a+w.durationMs,0);
-      const dist = dw.reduce((a,w)=>a+(w.distance||0),0);
-      const pee = dw.reduce((a,w)=>a+(w.pee||0),0);
-      const poop = dw.reduce((a,w)=>a+(w.poop||0),0);
-      const last = dw[0] ? new Date(dw[0].date).toLocaleDateString(undefined,{month:'short',day:'numeric'}) : '—';
-      html += `<div class="card stat-card">
-        <div class="dot" style="background:${d.color};width:18px;height:18px;"></div>
-        <div>
-          <div class="dog-name">${d.name}</div>
-          <div class="dog-meta">Last walk: ${last} · 💧${pee} 💩${poop}</div>
-        </div>
-        <div class="stat-nums">
-          <div><div class="stat-num">${dw.length}</div><div class="stat-label">Walks</div></div>
-          <div><div class="stat-num">${fmtTime(ms)}</div><div class="stat-label">Time</div></div>
-          <div><div class="stat-num">${dist.toFixed(1)}</div><div class="stat-label">Miles</div></div>
-        </div>
-      </div>`;
-    });
-  }
-  container.innerHTML = html;
-}
-
 function render(){
   const container = document.getElementById('content');
   if(activeTab==='track') renderTrack(container);
   else if(activeTab==='dogs') renderDogs(container);
   else if(activeTab==='history') renderHistory(container);
-  else if(activeTab==='stats') renderStats(container);
-  else if(activeTab==='invoice') renderInvoice(container);
+  else if(activeTab==='invoice') renderInvoicesTab(container);
 }
 
 render();      // draw the UI shell immediately, don't wait on the network
