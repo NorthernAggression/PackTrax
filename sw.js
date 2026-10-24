@@ -1,4 +1,4 @@
-const CACHE_NAME = 'packtrax-v1';
+const CACHE_NAME = 'packtrax-v4';
 const ASSETS = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (event) => {
@@ -17,16 +17,20 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
+// Stale-while-revalidate: serve the cached copy instantly, refresh it in the background
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+  const url = new URL(event.request.url);
+  if (url.origin !== location.origin) return; // leave Firebase, map tiles, fonts to the browser
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      if (cached) return cached;
-      return fetch(event.request).then((resp) => {
-        const copy = resp.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy)).catch(() => {});
-        return resp;
-      }).catch(() => cached);
-    })
+    caches.open(CACHE_NAME).then((cache) =>
+      cache.match(event.request).then((cached) => {
+        const network = fetch(event.request).then((resp) => {
+          if (resp && resp.ok) cache.put(event.request, resp.clone());
+          return resp;
+        }).catch(() => cached);
+        return cached || network;
+      })
+    )
   );
 });
