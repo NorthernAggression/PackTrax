@@ -105,7 +105,17 @@
   .remove-x{cursor:pointer;color:var(--ink-dim);font-size:16px;padding:2px 6px;}
 
   /* History — expandable walk cards */
-  .walk-card{background:var(--parchment);border-radius:6px;margin-bottom:10px;overflow:hidden;}
+  .walk-card{background:var(--parchment);border-radius:6px;margin-bottom:10px;overflow:hidden;position:relative;}
+  .status-dot{position:absolute;top:7px;left:7px;width:11px;height:11px;border-radius:50%;border:1.5px solid rgba(0,0,0,0.25);z-index:2;}
+  .status-dot.none{background:#d64545;}
+  .status-dot.pending{background:#e8962e;}
+  .status-dot.paid{background:#3f9b57;}
+  .status-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;color:var(--parchment);margin-bottom:12px;opacity:.85;}
+  .status-legend span{display:inline-flex;align-items:center;gap:5px;}
+  .status-legend i{width:10px;height:10px;border-radius:50%;display:inline-block;border:1.5px solid rgba(0,0,0,0.25);}
+  .invoice-row.locked{opacity:.55;}
+  .invoice-row .status-dot{position:static;flex-shrink:0;}
+  .add-picker-row{display:block;width:100%;text-align:left;background:var(--parchment-dim);color:var(--ink);border-radius:8px;padding:12px 14px;margin-top:8px;text-transform:none;letter-spacing:0;font-family:'Inter',sans-serif;font-size:13px;}
   .walk-card-header{display:flex;align-items:center;gap:12px;padding:14px 16px;cursor:pointer;user-select:none;}
   .walk-card-header .paw-icon{font-size:15px;flex-shrink:0;}
   .walk-summary{flex:1;min-width:0;}
@@ -264,6 +274,7 @@ let editRouteMap = null, editRoutePolyline = null, editRouteMarkers = [];
 let editingCareId = null;   // id of daycare/boarding record being time-edited
 let invoiceSelection = new Set();
 let invoicePrices = {};
+let invoiceAddPicker = false;  // showing the 'which invoice?' chooser
 let invoiceViewOpen = null;   // id of a saved invoice currently expanded in the Invoices tab
 let peeCount = 0;
 let poopCount = 0;
@@ -1878,11 +1889,25 @@ function toggleInvoiceSelect(id){
   render();
 }
 
-function createInvoiceFromSelection(){
-  const everything = getInvoiceableRecords();
-  const selected = everything.filter(x=>invoiceSelection.has(x.id));
-  if(selected.length===0) return;
+// Task status is derived from invoices: 'none' (red), 'pending' (orange), 'paid' (green)
+function taskStatus(type, id){
+  let status = 'none';
+  for(const inv of state.invoices){
+    if(inv.items.some(it=>it.type===type && it.recordId===id)){
+      if(!inv.paid) return 'pending';
+      status = 'paid';
+    }
+  }
+  return status;
+}
+function statusDotHtml(type, id){
+  const st = taskStatus(type, id);
+  const label = {none:'Not on an invoice', pending:'On an invoice, awaiting payment', paid:'Paid'}[st];
+  return `<span class="status-dot ${st}" title="${label}" aria-label="${label}"></span>`;
+}
 
+function buildItemsFromSelection(){
+  const selected = getInvoiceableRecords().filter(x=>invoiceSelection.has(x.id) && taskStatus(x.type,x.id)==='none');
   const dogNameSet = new Set();
   const items = selected.map(({type, id, record})=>{
     record.dogIds.forEach(did=>{ const dog=dogById(did); dogNameSet.add(dog?dog.name:'Unknown'); });
@@ -1896,25 +1921,45 @@ function createInvoiceFromSelection(){
       price
     };
   });
-  const total = items.reduce((a,it)=>a+it.price, 0);
+  return { selected, items, dogNameSet };
+}
+
+function finishInvoiceAction(selected){
+  new Set(selected.map(x=>x.type)).forEach(t=> invRecordSave(t)());
+  invoiceSelection = new Set();
+  invoicePrices = {};
+  invoiceAddPicker = false;
+  historyPanel = null;
+  render();
+  saveInvoices();
+}
+
+function createInvoiceFromSelection(){
+  const { selected, items, dogNameSet } = buildItemsFromSelection();
+  if(items.length===0) return;
   const invoice = {
     id: 'inv_'+Date.now(),
     createdAt: new Date().toISOString(),
     dogNames: Array.from(dogNameSet).join(' & '),
     items,
-    total,
+    total: items.reduce((a,it)=>a+it.price, 0),
     paid: false
   };
   state.invoices.unshift(invoice);
+  finishInvoiceAction(selected);
+}
 
-  const touchedTypes = new Set(selected.map(x=>x.type));
-  touchedTypes.forEach(t=> invRecordSave(t)());
-
-  invoiceSelection = new Set();
-  invoicePrices = {};
-  historyPanel = null;
-  render();
-  saveInvoices();
+function addSelectionToInvoice(invoiceId){
+  const inv = state.invoices.find(i=>i.id===invoiceId);
+  if(!inv || inv.paid) return;
+  const { selected, items, dogNameSet } = buildItemsFromSelection();
+  if(items.length===0) return;
+  inv.items.push(...items);
+  inv.total = inv.items.reduce((a,it)=>a+it.price, 0);
+  const names = new Set((inv.dogNames||'').split(' & ').filter(Boolean));
+  dogNameSet.forEach(n=>names.add(n));
+  inv.dogNames = Array.from(names).join(' & ');
+  finishInvoiceAction(selected);
 }
 
 function toggleInvoicePaid(id){
@@ -2250,6 +2295,17 @@ function renderHistoryStatsHtml(){
   return html;
 }
 
+function renderAddPickerHtml(){
+  const open = state.invoices.filter(i=>!i.paid).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
+  let h = `<div style="margin-top:14px;"><div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Add to which invoice?</div>`;
+  open.forEach(inv=>{
+    const d = new Date(inv.createdAt).toLocaleDateString(undefined,{month:'short',day:'numeric'});
+    h += `<button class="add-picker-row" data-addto="${inv.id}"><strong>${inv.dogNames||'Invoice'}</strong><br>${d} · ${inv.items.length} item${inv.items.length!==1?'s':''} · $${inv.total.toFixed(2)}</button>`;
+  });
+  h += `<button class="btn-back" id="cancelAddBtn" style="margin-top:8px;">Cancel</button></div>`;
+  return h;
+}
+
 function renderHistoryInvoiceHtml(){
   const everything = getInvoiceableRecords();
   if(everything.length===0){
@@ -2265,10 +2321,11 @@ function renderHistoryInvoiceHtml(){
   if(items.length===0){
     html += `<div class="card"><div class="empty" style="color:var(--ink-dim);">No records match the current filter.</div></div>`;
   } else {
-    const allSelected = items.every(x=>invoiceSelection.has(x.id));
+    const eligible = items.filter(x=>taskStatus(x.type,x.id)==='none');
+    const allSelected = eligible.length>0 && eligible.every(x=>invoiceSelection.has(x.id));
     html += `<div class="card dark select-all-row">
-      <input type="checkbox" id="selectAllInv" ${allSelected?'checked':''}>
-      <label for="selectAllInv">Select all (${items.length} item${items.length!==1?'s':''})</label>
+      <input type="checkbox" id="selectAllInv" ${allSelected?'checked':''} ${eligible.length===0?'disabled':''}>
+      <label for="selectAllInv">Select all (${eligible.length} not yet invoiced)</label>
     </div>`;
 
     html += `<div class="card" style="padding:2px 0;">`;
@@ -2277,12 +2334,16 @@ function renderHistoryInvoiceHtml(){
       const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'});
       const timeStr = d.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
       const dogNames = record.dogIds.map(did=>{ const dog=dogById(did); return dog?dog.name:'(removed dog)'; }).join(', ');
-      const isSelected = invoiceSelection.has(id);
+      const st = taskStatus(type, id);
+      const locked = st!=='none';
+      const isSelected = !locked && invoiceSelection.has(id);
       if(invoicePrices[id]===undefined) invoicePrices[id] = (record.price!=null ? String(record.price) : String(invDefaultPrice(type)));
       const metaBits = [dogNames, invRecordTypeLabel(type), invRecordDurationLabel(type, record)];
       if(type==='walk' && record.distance) metaBits.push(record.distance+' mi');
-      html += `<div class="invoice-row ${isSelected?'selected':''}">
-        <input type="checkbox" data-invcheck="${id}" ${isSelected?'checked':''}>
+      if(locked) metaBits.push(st==='paid' ? 'Paid' : 'On an invoice');
+      html += `<div class="invoice-row ${isSelected?'selected':''} ${locked?'locked':''}">
+        <input type="checkbox" data-invcheck="${id}" ${isSelected?'checked':''} ${locked?'disabled':''}>
+        <span class="status-dot ${st}"></span>
         <div class="invoice-row-info">
           <div class="invoice-row-top">${dateStr} <span style="color:var(--ink-dim);font-weight:400;">· ${timeStr}</span></div>
           <div class="invoice-row-meta">${metaBits.join(' · ')}</div>
@@ -2296,7 +2357,7 @@ function renderHistoryInvoiceHtml(){
     html += `</div>`;
   }
 
-  const selectedItems = items.filter(x=>invoiceSelection.has(x.id));
+  const selectedItems = items.filter(x=>invoiceSelection.has(x.id) && taskStatus(x.type,x.id)==='none');
   if(selectedItems.length>0){
     let total = 0;
     html += `<div class="card"><h3 style="margin-bottom:10px;color:var(--ink);">Invoice summary</h3>`;
@@ -2311,8 +2372,12 @@ function renderHistoryInvoiceHtml(){
       </div>`;
     });
     html += `<div class="invoice-total-row"><span>Total</span><span id="invoiceTotalVal">$${total.toFixed(2)}</span></div>
-      <button class="btn-primary" id="generateInvoiceBtn" style="margin-top:16px;">Generate &amp; Share Invoice</button>
-      <div class="geo-status" style="margin-top:8px;">Saves to the Invoices tab and includes "Pay by Venmo" and "Pay by Zelle" details</div>
+      <div class="row2" style="margin-top:16px;">
+        <button class="btn-primary" id="generateInvoiceBtn">Generate Invoice</button>
+        <button class="btn-start" id="addToInvoiceBtn">Add to Invoice</button>
+      </div>
+      ${invoiceAddPicker ? renderAddPickerHtml() : ''}
+      <div class="geo-status" style="margin-top:8px;">Generate starts a new invoice. Add puts these on an unpaid invoice you already made. Share from the Invoices tab.</div>
     </div>`;
   }
 
@@ -2326,6 +2391,10 @@ function renderHistory(container){
     <button class="history-toolbar-btn t-stats ${historyPanel==='stats'?'active':''}" id="historyStatsBtn">Stats</button>
     <button class="history-toolbar-btn t-invoice ${historyPanel==='invoice'?'active':''}" id="historyInvoiceBtn">Invoice</button>
   </div>`;
+
+  if(historyPanel!=='stats' && historyPanel!=='invoice'){
+    html += `<div class="status-legend"><span><i style="background:#d64545"></i>Not invoiced</span><span><i style="background:#e8962e"></i>Awaiting payment</span><span><i style="background:#3f9b57"></i>Paid</span></div>`;
+  }
 
   if(historyPanel!=='filter' && (historyFilter!=='all' || historyTypeFilter!=='all')){
     const dogLabel = historyFilter==='all' ? null : (dogById(historyFilter) ? dogById(historyFilter).name : '(removed dog)');
@@ -2383,6 +2452,7 @@ function renderHistory(container){
       const inDateStr = inTime.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' + inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
       const isOpen = expandedWalks.has(s.id);
       html += `<div class="walk-card">
+        ${statusDotHtml('daycare', s.id)}
         <div class="walk-card-header" data-toggle="${s.id}">
           <span class="paw-icon">🏠</span>
           <div class="walk-summary">
@@ -2439,6 +2509,7 @@ function renderHistory(container){
       const inDateStr = inTime.toLocaleDateString(undefined,{month:'short',day:'numeric',year:'numeric'}) + ' · ' + inTime.toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit'});
       const isOpen = expandedWalks.has(s.id);
       html += `<div class="walk-card">
+        ${statusDotHtml('boarding', s.id)}
         <div class="walk-card-header" data-toggle="${s.id}">
           <span class="paw-icon">🧳</span>
           <div class="walk-summary">
@@ -2493,6 +2564,7 @@ function renderHistory(container){
     const isOpen = expandedWalks.has(w.id);
     const isEditing = editingWalkId === w.id;
     html += `<div class="walk-card">
+      ${statusDotHtml('walk', w.id)}
       <div class="walk-card-header" data-toggle="${w.id}">
         <span class="paw-icon">🐾</span>
         <div class="walk-summary">
@@ -2571,7 +2643,7 @@ function renderHistory(container){
   const sBtn = container.querySelector('#historyStatsBtn');
   if(sBtn) sBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='stats' ? null : 'stats'; render(); });
   const iBtn = container.querySelector('#historyInvoiceBtn');
-  if(iBtn) iBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='invoice' ? null : 'invoice'; invoiceSelection = new Set(); invoicePrices = {}; render(); });
+  if(iBtn) iBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='invoice' ? null : 'invoice'; invoiceSelection = new Set(); invoicePrices = {}; invoiceAddPicker = false; render(); });
   const clearChip = container.querySelector('#clearHistoryFilterChip');
   if(clearChip) clearChip.addEventListener('click', ()=>{ historyFilter='all'; historyTypeFilter='all'; render(); });
 
@@ -2585,6 +2657,7 @@ function renderHistory(container){
 
   const invItems = getInvoiceableRecords()
     .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter))
+    .filter(x => taskStatus(x.type,x.id)==='none')
     .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
   const selectAllInv = container.querySelector('#selectAllInv');
   if(selectAllInv) selectAllInv.addEventListener('change', e=>{
@@ -2610,6 +2683,14 @@ function renderHistory(container){
   });
   const generateBtn = container.querySelector('#generateInvoiceBtn');
   if(generateBtn) generateBtn.addEventListener('click', ()=>{ createInvoiceFromSelection(); });
+  const addBtn = container.querySelector('#addToInvoiceBtn');
+  if(addBtn) addBtn.addEventListener('click', ()=>{
+    if(!state.invoices.some(i=>!i.paid)){ alert('There are no unpaid invoices to add to yet. Use Generate Invoice to start one.'); return; }
+    invoiceAddPicker = true; render();
+  });
+  container.querySelectorAll('[data-addto]').forEach(b=>b.addEventListener('click', ()=>addSelectionToInvoice(b.dataset.addto)));
+  const cancelAdd = container.querySelector('#cancelAddBtn');
+  if(cancelAdd) cancelAdd.addEventListener('click', ()=>{ invoiceAddPicker = false; render(); });
   const invDoneBtn = container.querySelector('#historyInvoiceDoneBtn');
   if(invDoneBtn) invDoneBtn.addEventListener('click', ()=>{ historyPanel=null; render(); });
 
