@@ -619,17 +619,31 @@ async function migrateLocalIfEmpty(key, localKey){
     return (snap.data() && snap.data().items) || [];
   }catch(e){
     console.error('load/migrate failed for', key, e);
-    return [];
+    return null;   // null = load failed, keep whatever we have cached
   }
 }
 
+// ---- Local cache: draw the last known data instantly, refresh from Firebase after ----
+const CACHE_PREFIX = 'packtrax-cache:';
+const CACHE_KEYS = ['dogs','walks','daycare','boarding','invoices'];
+function cacheWrite(key, items){
+  try{ localStorage.setItem(CACHE_PREFIX+key, JSON.stringify(items)); }catch(e){}
+}
+function hydrateFromCache(){
+  CACHE_KEYS.forEach(k=>{
+    try{
+      const raw = localStorage.getItem(CACHE_PREFIX+k);
+      if(raw){ const v = JSON.parse(raw); if(Array.isArray(v)) state[k] = v; }
+    }catch(e){}
+  });
+}
+
 async function loadState(){
-  await ensureFirebaseAuth();
-  state.dogs = await migrateLocalIfEmpty('dogs', 'pack-trail-dogs');
-  state.walks = await migrateLocalIfEmpty('walks', 'pack-trail-walks');
-  state.daycare = await migrateLocalIfEmpty('daycare', 'pack-trail-daycare');
-  state.boarding = await migrateLocalIfEmpty('boarding', 'pack-trail-boarding');
-  state.invoices = await migrateLocalIfEmpty('invoices', 'pack-trail-invoices');
+  try{ await ensureFirebaseAuth(); }catch(e){ console.error('auth failed', e); }
+  for(const k of CACHE_KEYS){
+    const v = await migrateLocalIfEmpty(k, 'pack-trail-'+k);
+    if(v!==null){ state[k] = v; cacheWrite(k, v); }
+  }
   try{
     const snap = await docRef('activeWalk').get();
     recoveredWalk = snap.exists ? snap.data() : null;
@@ -638,22 +652,27 @@ async function loadState(){
 }
 
 async function saveDogs(){
+  cacheWrite('dogs', state.dogs);
   try{ await docRef('dogs').set({ items: state.dogs }); }
   catch(e){ console.error('save dogs failed', e); }
 }
 async function saveWalks(){
+  cacheWrite('walks', state.walks);
   try{ await docRef('walks').set({ items: state.walks }); }
   catch(e){ console.error('save walks failed', e); }
 }
 async function saveDaycare(){
+  cacheWrite('daycare', state.daycare);
   try{ await docRef('daycare').set({ items: state.daycare }); }
   catch(e){ console.error('save daycare failed', e); }
 }
 async function saveBoarding(){
+  cacheWrite('boarding', state.boarding);
   try{ await docRef('boarding').set({ items: state.boarding }); }
   catch(e){ console.error('save boarding failed', e); }
 }
 async function saveInvoices(){
+  cacheWrite('invoices', state.invoices);
   try{ await docRef('invoices').set({ items: state.invoices }); }
   catch(e){ console.error('save invoices failed', e); }
 }
@@ -2712,7 +2731,8 @@ function render(){
   else if(activeTab==='invoice') renderInvoicesTab(container);
 }
 
-render();      // draw the UI shell immediately, don't wait on the network
+hydrateFromCache();  // last known data, instantly
+render();      // draw immediately, don't wait on the network
 loadState();   // then fetch real data in the background and re-render
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
