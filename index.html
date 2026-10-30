@@ -368,8 +368,15 @@ async function attemptRouteSnapForWalk(walkId, route){
     if(data.code !== 'Ok' || !data.matchings || !data.matchings.length) throw new Error('no match');
     const snapped = [];
     data.matchings.forEach(m=>{
-      m.geometry.coordinates.forEach(([lng,lat])=> snapped.push({lat,lng}));
+      m.geometry.coordinates.forEach(([lng,lat])=> snapped.push({lat:+lat.toFixed(6), lng:+lng.toFixed(6)}));
     });
+    if(snapped.length > 1000){
+      const step = Math.ceil(snapped.length/1000);
+      const last = snapped[snapped.length-1];
+      const thin = snapped.filter((_,i)=> i%step===0);
+      if(thin[thin.length-1]!==last) thin.push(last);
+      snapped.length = 0; thin.forEach(p=>snapped.push(p));
+    }
     if(snapped.length > 1){
       const w = state.walks.find(w=>w.id===walkId);
       if(w){
@@ -615,30 +622,51 @@ function docRef(key){
 
 // One-time: if Firestore has nothing for this key yet but an old local
 // save exists on this device, upload it so earlier data isn't stranded.
-async function migrateLocalIfEmpty(key, localKey){
+async function remoteLoadList(key, localKey){
   try{
     const snap = await docRef(key).get();
     if(!snap.exists){
       const local = localStorage.getItem(localKey);
       if(local){
         const items = JSON.parse(local);
-        await docRef(key).set({ items, migratedAt: new Date().toISOString() });
+        await remoteWriteList(key, chunkItems(items), 1);
         return items;
       }
       return [];
     }
-    return (snap.data() && snap.data().items) || [];
+    const d = snap.data() || {};
+    let items = d.items || [];
+    const n = d.chunks || 1;
+    for(let i=1;i<n;i++){
+      const s2 = await docRef(chunkDocKey(key,i)).get();
+      if(!s2.exists) throw new Error('missing chunk '+i+' of '+key);
+      items = items.concat((s2.data()||{}).items || []);
+    }
+    setKnownChunkCount(key, n);
+    return items;
   }catch(e){
-    console.error('load/migrate failed for', key, e);
+    console.error('load failed for', key, e);
     return null;   // null = load failed, keep whatever we have cached
   }
+}
+async function remoteWriteList(key, chunks, prevCount){
+  try{ await ensureFirebaseAuth(); }catch(e){}
+  const batch = db.batch();
+  chunks.forEach((c,i)=> batch.set(docRef(chunkDocKey(key,i)), { items:c, chunks:chunks.length, savedAt:new Date().toISOString() }));
+  for(let i=chunks.length;i<prevCount;i++) batch.delete(docRef(chunkDocKey(key,i)));
+  await batch.commit();
 }
 
 // ---- Local cache: draw the last known data instantly, refresh from Firebase after ----
 const CACHE_PREFIX = 'packtrax-cache:';
 const CACHE_KEYS = ['dogs','walks','daycare','boarding','invoices'];
 function cacheWrite(key, items){
-  try{ localStorage.setItem(CACHE_PREFIX+key, JSON.stringify(items)); }catch(e){}
+  try{ localStorage.setItem(CACHE_PREFIX+key, JSON.stringify(items)); return true; }
+  catch(e){
+    // too big for local storage: drop the stale copy so it can never override newer cloud data
+    try{ localStorage.removeItem(CACHE_PREFIX+key); }catch(_){}
+    return false;
+  }
 }
 function hydrateFromCache(){
   CACHE_KEYS.forEach(k=>{
@@ -649,10 +677,84 @@ function hydrateFromCache(){
   });
 }
 
+
+// ---- Chunked list storage: a Firestore document tops out near 1 MiB, so big lists are split ----
+const CHUNK_CHARS = 400000;
+function chunkItems(items){
+  const chunks = []; let cur = []; let size = 0;
+  for(const it of items){
+    const n = JSON.stringify(it).length;
+    if(cur.length && size + n > CHUNK_CHARS){ chunks.push(cur); cur = []; size = 0; }
+    cur.push(it); size += n;
+  }
+  chunks.push(cur);
+  return chunks;
+}
+function chunkDocKey(key, i){ return i===0 ? key : key+'_'+i; }
+function knownChunkCount(key){
+  try{ return parseInt(localStorage.getItem('packtrax-chunks:'+key) || '1', 10) || 1; }catch(e){ return 1; }
+}
+function setKnownChunkCount(key, n){
+  try{ localStorage.setItem('packtrax-chunks:'+key, String(n)); }catch(e){}
+}
+
+// "pending" = saved on this phone but not yet confirmed in the cloud
+function setPending(key, on){
+  try{
+    if(on) localStorage.setItem('packtrax-pending:'+key, '1');
+    else localStorage.removeItem('packtrax-pending:'+key);
+  }catch(e){}
+}
+function isPending(key){
+  try{ return localStorage.getItem('packtrax-pending:'+key)==='1' && localStorage.getItem(CACHE_PREFIX+key)!==null; }
+  catch(e){ return false; }
+}
+
+function setSyncError(on){
+  let el = document.getElementById('syncBanner');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'syncBanner';
+    el.style.cssText = 'position:fixed;bottom:76px;left:12px;right:12px;background:#c1502e;color:#fff;padding:10px 14px;border-radius:8px;font-size:13px;z-index:9999;display:none;text-align:center;font-family:Inter,sans-serif;';
+    el.textContent = "Couldn't save to the cloud. Your latest changes are kept on this phone and will retry automatically.";
+    document.body.appendChild(el);
+  }
+  el.style.display = on ? 'block' : 'none';
+}
+
+const saveChains = {};
+const retryTimers = {};
+function saveList(key){
+  const cached = cacheWrite(key, state[key]);
+  if(cached) setPending(key, true);
+  saveChains[key] = (saveChains[key] || Promise.resolve()).then(()=> writeListNow(key));
+  return saveChains[key];
+}
+async function writeListNow(key){
+  try{
+    const chunks = chunkItems(state[key]);
+    await remoteWriteList(key, chunks, knownChunkCount(key));
+    setKnownChunkCount(key, chunks.length);
+    setPending(key, false);
+    setSyncError(false);
+  }catch(e){
+    console.error('save failed for', key, e);
+    setSyncError(true);
+    if(!retryTimers[key]){
+      retryTimers[key] = setTimeout(()=>{ retryTimers[key] = null; saveList(key); }, 30000);
+    }
+  }
+}
+
 async function loadState(){
   try{ await ensureFirebaseAuth(); }catch(e){ console.error('auth failed', e); }
   for(const k of CACHE_KEYS){
-    const v = await migrateLocalIfEmpty(k, 'pack-trail-'+k);
+    if(isPending(k)){
+      // this phone has changes the cloud never confirmed: keep them and push again
+      saveList(k);
+      continue;
+    }
+    const v = await remoteLoadList(k, 'pack-trail-'+k);
     if(v!==null){ state[k] = v; cacheWrite(k, v); }
   }
   try{
@@ -662,31 +764,11 @@ async function loadState(){
   render();
 }
 
-async function saveDogs(){
-  cacheWrite('dogs', state.dogs);
-  try{ await docRef('dogs').set({ items: state.dogs }); }
-  catch(e){ console.error('save dogs failed', e); }
-}
-async function saveWalks(){
-  cacheWrite('walks', state.walks);
-  try{ await docRef('walks').set({ items: state.walks }); }
-  catch(e){ console.error('save walks failed', e); }
-}
-async function saveDaycare(){
-  cacheWrite('daycare', state.daycare);
-  try{ await docRef('daycare').set({ items: state.daycare }); }
-  catch(e){ console.error('save daycare failed', e); }
-}
-async function saveBoarding(){
-  cacheWrite('boarding', state.boarding);
-  try{ await docRef('boarding').set({ items: state.boarding }); }
-  catch(e){ console.error('save boarding failed', e); }
-}
-async function saveInvoices(){
-  cacheWrite('invoices', state.invoices);
-  try{ await docRef('invoices').set({ items: state.invoices }); }
-  catch(e){ console.error('save invoices failed', e); }
-}
+async function saveDogs(){ return saveList('dogs'); }
+async function saveWalks(){ return saveList('walks'); }
+async function saveDaycare(){ return saveList('daycare'); }
+async function saveBoarding(){ return saveList('boarding'); }
+async function saveInvoices(){ return saveList('invoices'); }
 
 // ---- Crash/close recovery for an in-progress walk ----
 async function saveActiveWalkState(){
