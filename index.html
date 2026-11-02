@@ -936,6 +936,7 @@ function confirmDaycareAction(){
   }
   daycareExpanded = false;
   daycareAction = null;
+  selectedDogIds = [];
   render();
   saveDaycare();
 }
@@ -978,6 +979,7 @@ function confirmBoardingAction(){
   }
   boardingExpanded = false;
   boardingAction = null;
+  selectedDogIds = [];
   render();
   saveBoarding();
 }
@@ -2044,14 +2046,89 @@ function addSelectionToInvoice(invoiceId){
   finishInvoiceAction(selected);
 }
 
+// Shrink a route to ~maxPoints with Ramer-Douglas-Peucker (keeps the shape, drops fine detail)
+const SIMPLIFIED_MAX_POINTS = 150;
+function simplifyRoute(route, maxPoints){
+  maxPoints = maxPoints || SIMPLIFIED_MAX_POINTS;
+  if(!route || route.length <= maxPoints) return route;
+  const lat0 = route[0].lat * Math.PI/180;
+  const kx = 111320 * Math.cos(lat0), ky = 110540;
+  const pts = route.map(p=>({x:p.lng*kx, y:p.lat*ky}));
+  const n = pts.length;
+
+  function keepIndices(tol){
+    const keep = new Uint8Array(n);
+    keep[0] = 1; keep[n-1] = 1;
+    const stack = [[0, n-1]];
+    while(stack.length){
+      const [lo, hi] = stack.pop();
+      if(hi <= lo+1) continue;
+      const A = pts[lo], B = pts[hi];
+      const dx = B.x-A.x, dy = B.y-A.y;
+      const len2 = dx*dx + dy*dy;
+      let maxD = -1, idx = -1;
+      for(let i=lo+1;i<hi;i++){
+        const P = pts[i];
+        let d;
+        if(len2===0){ d = Math.hypot(P.x-A.x, P.y-A.y); }
+        else{
+          let t = ((P.x-A.x)*dx + (P.y-A.y)*dy) / len2;
+          t = Math.max(0, Math.min(1, t));
+          d = Math.hypot(P.x-(A.x+t*dx), P.y-(A.y+t*dy));
+        }
+        if(d > maxD){ maxD = d; idx = i; }
+      }
+      if(maxD > tol){ keep[idx] = 1; stack.push([lo, idx], [idx, hi]); }
+    }
+    const out = [];
+    for(let i=0;i<n;i++) if(keep[i]) out.push(i);
+    return out;
+  }
+
+  let tol = 1, idxs = keepIndices(tol);
+  while(idxs.length > maxPoints && tol < 2000){ tol *= 1.4; idxs = keepIndices(tol); }
+  if(idxs.length > maxPoints){   // safety net: even spacing
+    const step = (n-1)/(maxPoints-1);
+    idxs = Array.from({length:maxPoints}, (_,i)=> Math.round(i*step));
+  }
+  return idxs.map(i=>route[i]);
+}
+
+function walksToSimplifyForInvoice(inv){
+  const out = [];
+  inv.items.forEach(it=>{
+    if(it.type!=='walk') return;
+    const w = state.walks.find(x=>x.id===it.recordId);
+    if(w && w.route && w.route.length > SIMPLIFIED_MAX_POINTS) out.push(w);
+  });
+  return out;
+}
+
 function toggleInvoicePaid(id){
   const inv = state.invoices.find(i=>i.id===id);
   if(!inv) return;
   const next = !inv.paid;
-  if(!confirm(next ? 'Mark this invoice as paid?' : 'Mark this invoice as unpaid?')) return;
+  let msg;
+  if(next){
+    const count = walksToSimplifyForInvoice(inv).length;
+    msg = 'Mark this invoice as paid?';
+    if(count>0) msg += `\n\nTo save space, the routes on ${count} walk${count!==1?'s':''} in this invoice will be simplified. The map keeps its shape but loses fine detail, and this can't be undone.`;
+  } else {
+    msg = 'Mark this invoice as unpaid?';
+  }
+  if(!confirm(msg)) return;
   inv.paid = next;
+  let walksChanged = false;
+  if(next){
+    walksToSimplifyForInvoice(inv).forEach(w=>{
+      w.route = simplifyRoute(w.route, SIMPLIFIED_MAX_POINTS);
+      w.routeSimplified = true;
+      walksChanged = true;
+    });
+  }
   render();
   saveInvoices();
+  if(walksChanged) saveWalks();
 }
 
 function deleteInvoice(id){
