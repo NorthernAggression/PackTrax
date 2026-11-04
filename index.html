@@ -1990,6 +1990,11 @@ function statusDotHtml(type, id){
   return `<span class="status-dot ${st}" title="${label}" aria-label="${label}"></span>`;
 }
 
+// Invoice lines always read oldest to newest
+function sortByDateAsc(items){
+  return items.slice().sort((a,b)=> new Date(a.date) - new Date(b.date));
+}
+
 function buildItemsFromSelection(){
   const selected = getInvoiceableRecords().filter(x=>invoiceSelection.has(x.id) && taskStatus(x.type,x.id)==='none');
   const dogNameSet = new Set();
@@ -2025,7 +2030,7 @@ function createInvoiceFromSelection(){
     id: 'inv_'+Date.now(),
     createdAt: new Date().toISOString(),
     dogNames: Array.from(dogNameSet).join(' & '),
-    items,
+    items: sortByDateAsc(items),
     total: items.reduce((a,it)=>a+it.price, 0),
     paid: false
   };
@@ -2038,7 +2043,7 @@ function addSelectionToInvoice(invoiceId){
   if(!inv || inv.paid) return;
   const { selected, items, dogNameSet } = buildItemsFromSelection();
   if(items.length===0) return;
-  inv.items.push(...items);
+  inv.items = sortByDateAsc(inv.items.concat(items));
   inv.total = inv.items.reduce((a,it)=>a+it.price, 0);
   const names = new Set((inv.dogNames||'').split(' & ').filter(Boolean));
   dogNameSet.forEach(n=>names.add(n));
@@ -2247,7 +2252,7 @@ async function buildInvoiceSnapshot(items){
 }
 
 async function buildSavedInvoiceSnapshot(invoice){
-  const rows = invoice.items.map(it=>{
+  const rows = sortByDateAsc(invoice.items).map(it=>{
     const d = new Date(it.date);
     return {
       dateStr: d.toLocaleDateString(undefined,{month:'short',day:'numeric'}),
@@ -2352,7 +2357,7 @@ function renderInvoicesTab(container){
       </div>`;
     if(isOpen){
       html += `<div class="walk-card-body">`;
-      inv.items.forEach(it=>{
+      sortByDateAsc(inv.items).forEach(it=>{
         const d = new Date(it.date);
         const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
         html += `<div class="invoice-line">
@@ -2520,7 +2525,7 @@ function renderHistoryInvoiceHtml(){
   if(selectedItems.length>0){
     let total = 0;
     html += `<div class="card"><h3 style="margin-bottom:10px;color:var(--ink);">Invoice summary</h3>`;
-    selectedItems.forEach(({type, id, record})=>{
+    selectedItems.slice().sort((a,b)=> invRecordDate(a.type,a.record) - invRecordDate(b.type,b.record)).forEach(({type, id, record})=>{
       const d = invRecordDate(type, record);
       const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
       const price = parseFloat(invoicePrices[id]) || 0;
