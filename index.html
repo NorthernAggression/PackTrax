@@ -41,9 +41,12 @@
   }
   .app{max-width:640px;margin:0 auto;padding:24px 18px 60px;}
   h1,h2,h3{font-family:'Oswald',sans-serif;text-transform:uppercase;letter-spacing:0.03em;margin:0;}
-  .header{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:6px;}
+  .header{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;}
+  .header .brand{display:flex;align-items:center;gap:10px;}
   .header h1{font-size:26px;color:var(--parchment);}
-  .header .paw{font-size:20px;}
+  .header .paw{font-size:24px;line-height:1;}
+  .gear-btn{width:auto;padding:6px;background:none;border:none;border-radius:50%;color:var(--parchment);cursor:pointer;display:flex;align-items:center;justify-content:center;opacity:.85;}
+  .gear-btn.active{color:var(--blaze-yellow);opacity:1;}
   .subtitle{color:var(--line);font-size:13px;margin-bottom:22px;letter-spacing:0.02em;}
 
   .tabs{display:flex;gap:6px;margin-bottom:22px;border-bottom:1px solid var(--border);}
@@ -163,6 +166,8 @@
   .invoice-total-row span:last-child{font-family:'JetBrains Mono',monospace;font-size:22px;}
   .select-all-row{padding:12px 16px;display:flex;align-items:center;gap:10px;}
   .select-all-row label{font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--parchment);cursor:pointer;}
+  .settings-h{font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:12px;color:var(--ink);}
+  .settings-note{font-size:12px;color:var(--ink-dim);margin-top:8px;line-height:1.4;}
   .history-toolbar-btn{font-size:13px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#fff;border:2px solid transparent;border-radius:12px;padding:14px 6px;box-shadow:0 3px 0 rgba(0,0,0,0.28);transition:transform .08s, box-shadow .08s;}
   .history-toolbar-btn:active{transform:translateY(2px);box-shadow:0 1px 0 rgba(0,0,0,0.28);}
   .history-toolbar-btn.t-filter{background:var(--blaze-blue);}
@@ -238,7 +243,12 @@
 </head>
 <body>
 <div class="app">
-  <div class="header"><h1>PackTrax</h1><span class="paw">🐾</span></div>
+  <div class="header">
+    <div class="brand"><span class="paw">🐾</span><h1>PackTrax</h1></div>
+    <button class="gear-btn" id="gearBtn" aria-label="Settings" title="Settings">
+      <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.03 1.56V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.56 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.56-1.03H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.56-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34h0A1.7 1.7 0 0 0 10.4 3.1V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1.03 1.56h0a1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87v0a1.7 1.7 0 0 0 1.56 1.03H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
   <div class="subtitle">walk log for the whole crew</div>
 
   <div class="tabs">
@@ -255,6 +265,11 @@
 const COLORS = ['#e8b23e','#3e7ca6','#c1502e','#6b8e4e','#8c5fa3','#4e8c82','#b06b3e','#4e6ab0'];
 
 let state = { dogs: [], walks: [], daycare: [], boarding: [], invoices: [] };
+function defaultSettings(){ return { businessName:'', venmo:'', zelle:'', priceWalk:15, priceDaycare:25, priceBoarding:50 }; }
+let settings = defaultSettings();
+let currentUid = null, currentEmail = null;   // who is signed in
+let authEpoch = 0;                            // bumps whenever the signed-in user changes
+let initialLoadDone = false, loadFailed = false;
 let activeTab = 'track';
 let timerRunning = false;
 let timerStart = null;
@@ -586,7 +601,7 @@ function initEditRouteMap(){
   });
 }
 
-// ---- Firebase / Firestore storage ----
+// ---- Firebase: accounts + per-user storage ----
 const firebaseConfig = {
   apiKey: "AIzaSyDb5UE-k6Q70R3Oj-MMqAJED0a5waotfh8",
   authDomain: "packtrax-d7ca3.firebaseapp.com",
@@ -600,40 +615,16 @@ firebase.initializeApp(firebaseConfig);
 const db = firebase.firestore();
 try{ db.enablePersistence({synchronizeTabs:true}).catch(()=>{}); }catch(e){}
 
-let fbReady = null; // resolves once signed in
-function ensureFirebaseAuth(){
-  if(!fbReady){
-    fbReady = new Promise(resolve=>{
-      firebase.auth().onAuthStateChanged(user=>{
-        if(user) resolve(user);
-        else firebase.auth().signInAnonymously().catch(err=>{
-          console.error('Firebase anonymous sign-in failed', err);
-          resolve(null);
-        });
-      });
-    });
-  }
-  return fbReady;
-}
-
+// A signed-in user only ever reads/writes users/<their uid>/data/*
 function docRef(key){
-  return db.collection('packtrax').doc(key);
+  if(!currentUid) throw new Error('not signed in');
+  return db.collection('users').doc(currentUid).collection('data').doc(key);
 }
 
-// One-time: if Firestore has nothing for this key yet but an old local
-// save exists on this device, upload it so earlier data isn't stranded.
-async function remoteLoadList(key, localKey){
+async function remoteLoadList(key){
   try{
     const snap = await docRef(key).get();
-    if(!snap.exists){
-      const local = localStorage.getItem(localKey);
-      if(local){
-        const items = JSON.parse(local);
-        await remoteWriteList(key, chunkItems(items), 1);
-        return items;
-      }
-      return [];
-    }
+    if(!snap.exists) return [];
     const d = snap.data() || {};
     let items = d.items || [];
     const n = d.chunks || 1;
@@ -650,28 +641,82 @@ async function remoteLoadList(key, localKey){
   }
 }
 async function remoteWriteList(key, chunks, prevCount){
-  try{ await ensureFirebaseAuth(); }catch(e){}
   const batch = db.batch();
   chunks.forEach((c,i)=> batch.set(docRef(chunkDocKey(key,i)), { items:c, chunks:chunks.length, savedAt:new Date().toISOString() }));
   for(let i=chunks.length;i<prevCount;i++) batch.delete(docRef(chunkDocKey(key,i)));
   await batch.commit();
 }
+async function remoteLoadSettings(){
+  const snap = await docRef('settings').get();
+  return snap.exists ? ((snap.data()||{}).settings || null) : null;
+}
+async function remoteWriteSettings(obj){ await docRef('settings').set({ settings: obj }); }
+
+// ---- Accounts ----
+function startAuth(){
+  firebase.auth().onAuthStateChanged(user=>{
+    if(user && !user.isAnonymous) onSignedIn(user.uid, user.email);
+    else if(user && user.isAnonymous) firebase.auth().signOut();   // old pre-accounts session
+    else onSignedOut();
+  });
+}
+function authSignIn(email, pw){ return firebase.auth().signInWithEmailAndPassword(email, pw); }
+function authSignUp(email, pw){ return firebase.auth().createUserWithEmailAndPassword(email, pw); }
+function authReset(email){ return firebase.auth().sendPasswordResetEmail(email); }
+function authSignOut(){ return firebase.auth().signOut(); }
+function authErrorText(err){
+  const c = (err && err.code) || '';
+  const map = {
+    'auth/invalid-email': "That email address doesn't look right.",
+    'auth/missing-password': 'Enter your password.',
+    'auth/invalid-credential': 'Wrong email or password.',
+    'auth/wrong-password': 'Wrong email or password.',
+    'auth/user-not-found': 'No account with that email. Tap Create account.',
+    'auth/email-already-in-use': 'That email already has an account. Try signing in.',
+    'auth/weak-password': 'Use a password with at least 6 characters.',
+    'auth/network-request-failed': 'No connection. Check your signal and try again.',
+    'auth/too-many-requests': 'Too many attempts. Wait a minute and try again.',
+    'auth/operation-not-allowed': "Email sign-in isn't turned on in Firebase yet."
+  };
+  return map[c] || ('Something went wrong (' + (c || 'unknown') + ').');
+}
+
+// ---- The original shared (pre-accounts) data ----
+async function legacyCloudLoad(key){
+  const ref = k => db.collection('packtrax').doc(k);
+  const snap = await ref(key).get();
+  if(!snap.exists) return [];
+  const d = snap.data() || {};
+  let items = d.items || [];
+  const n = d.chunks || 1;
+  for(let i=1;i<n;i++){
+    const s2 = await ref(chunkDocKey(key,i)).get();
+    if(s2.exists) items = items.concat((s2.data()||{}).items || []);
+  }
+  return items;
+}
 
 // ---- Local cache: draw the last known data instantly, refresh from Firebase after ----
-const CACHE_PREFIX = 'packtrax-cache:';
+function cacheKey(key){ return 'packtrax-cache:' + currentUid + ':' + key; }
 const CACHE_KEYS = ['dogs','walks','daycare','boarding','invoices'];
 function cacheWrite(key, items){
-  try{ localStorage.setItem(CACHE_PREFIX+key, JSON.stringify(items)); return true; }
+  if(!currentUid) return false;
+  try{ localStorage.setItem(cacheKey(key), JSON.stringify(items)); return true; }
   catch(e){
     // too big for local storage: drop the stale copy so it can never override newer cloud data
-    try{ localStorage.removeItem(CACHE_PREFIX+key); }catch(_){}
+    try{ localStorage.removeItem(cacheKey(key)); }catch(_){}
     return false;
   }
 }
 function hydrateFromCache(){
+  if(!currentUid) return;
+  try{
+    const rs = localStorage.getItem(cacheKey('settings'));
+    if(rs) settings = Object.assign(defaultSettings(), JSON.parse(rs));
+  }catch(e){}
   CACHE_KEYS.forEach(k=>{
     try{
-      const raw = localStorage.getItem(CACHE_PREFIX+k);
+      const raw = localStorage.getItem(cacheKey(k));
       if(raw){ const v = JSON.parse(raw); if(Array.isArray(v)) state[k] = v; }
     }catch(e){}
   });
@@ -692,21 +737,21 @@ function chunkItems(items){
 }
 function chunkDocKey(key, i){ return i===0 ? key : key+'_'+i; }
 function knownChunkCount(key){
-  try{ return parseInt(localStorage.getItem('packtrax-chunks:'+key) || '1', 10) || 1; }catch(e){ return 1; }
+  try{ return parseInt(localStorage.getItem('packtrax-chunks:'+currentUid+':'+key) || '1', 10) || 1; }catch(e){ return 1; }
 }
 function setKnownChunkCount(key, n){
-  try{ localStorage.setItem('packtrax-chunks:'+key, String(n)); }catch(e){}
+  try{ localStorage.setItem('packtrax-chunks:'+currentUid+':'+key, String(n)); }catch(e){}
 }
 
 // "pending" = saved on this phone but not yet confirmed in the cloud
 function setPending(key, on){
   try{
-    if(on) localStorage.setItem('packtrax-pending:'+key, '1');
-    else localStorage.removeItem('packtrax-pending:'+key);
+    if(on) localStorage.setItem('packtrax-pending:'+currentUid+':'+key, '1');
+    else localStorage.removeItem('packtrax-pending:'+currentUid+':'+key);
   }catch(e){}
 }
 function isPending(key){
-  try{ return localStorage.getItem('packtrax-pending:'+key)==='1' && localStorage.getItem(CACHE_PREFIX+key)!==null; }
+  try{ return localStorage.getItem('packtrax-pending:'+currentUid+':'+key)==='1' && localStorage.getItem(cacheKey(key))!==null; }
   catch(e){ return false; }
 }
 
@@ -725,12 +770,14 @@ function setSyncError(on){
 const saveChains = {};
 const retryTimers = {};
 function saveList(key){
+  const epoch = authEpoch;
   const cached = cacheWrite(key, state[key]);
   if(cached) setPending(key, true);
-  saveChains[key] = (saveChains[key] || Promise.resolve()).then(()=> writeListNow(key));
+  saveChains[key] = (saveChains[key] || Promise.resolve()).then(()=> writeListNow(key, epoch));
   return saveChains[key];
 }
-async function writeListNow(key){
+async function writeListNow(key, epoch){
+  if(!currentUid || epoch!==authEpoch) return;
   try{
     const chunks = chunkItems(state[key]);
     await remoteWriteList(key, chunks, knownChunkCount(key));
@@ -746,22 +793,177 @@ async function writeListNow(key){
   }
 }
 
-async function loadState(){
-  try{ await ensureFirebaseAuth(); }catch(e){ console.error('auth failed', e); }
-  for(const k of CACHE_KEYS){
-    if(isPending(k)){
-      // this phone has changes the cloud never confirmed: keep them and push again
-      saveList(k);
-      continue;
-    }
-    const v = await remoteLoadList(k, 'pack-trail-'+k);
-    if(v!==null){ state[k] = v; cacheWrite(k, v); }
+function hasAnyCache(){
+  try{ return CACHE_KEYS.some(k=> localStorage.getItem(cacheKey(k))!==null); }catch(e){ return false; }
+}
+function resetState(){
+  state = { dogs: [], walks: [], daycare: [], boarding: [], invoices: [] };
+  settings = defaultSettings();
+  selectedDogIds = []; recoveredWalk = null;
+  expandedWalks = new Set();
+  invoiceSelection = new Set(); invoicePrices = {}; invoiceViewOpen = null; invoiceAddPicker = false;
+  historyFilter = 'all'; historyTypeFilter = 'all'; historyPanel = null;
+}
+
+function onSignedIn(uid, email){
+  hideAuthScreen();
+  if(uid !== currentUid){
+    authEpoch++;
+    currentUid = uid;
+    resetState();
+    hydrateFromCache();
+    initialLoadDone = hasAnyCache();
+    loadFailed = false;
   }
+  currentEmail = email;
+  try{ localStorage.setItem('packtrax-lastuid', uid); }catch(e){}
+  render();
+  loadState();
+}
+function onSignedOut(){
+  authEpoch++;
+  currentUid = null; currentEmail = null;
+  initialLoadDone = false; loadFailed = false;
+  try{ localStorage.removeItem('packtrax-lastuid'); }catch(e){}
+  Object.keys(saveChains).forEach(k=> delete saveChains[k]);
+  Object.keys(retryTimers).forEach(k=>{ clearTimeout(retryTimers[k]); delete retryTimers[k]; });
+  setSyncError(false);
+  resetState();
+  render();
+  showAuthScreen();
+}
+
+function showAuthScreen(){
+  let el = document.getElementById('authScreen');
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'authScreen';
+    el.style.cssText = 'position:fixed;inset:0;z-index:10000;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px;overflow:auto;';
+    el.innerHTML = `<div style="width:100%;max-width:380px;">
+      <div style="font-family:'Oswald',sans-serif;font-size:34px;letter-spacing:0.04em;color:var(--blaze-yellow);text-align:center;">🐾 PackTrax</div>
+      <div style="text-align:center;color:var(--parchment);opacity:.8;margin:6px 0 20px;font-size:13px;">Dog walking, daycare and boarding tracker</div>
+      <div class="card">
+        <div class="field"><label>Email</label><input id="authEmail" type="email" autocomplete="email" inputmode="email"></div>
+        <div class="field"><label>Password</label><input id="authPass" type="password" autocomplete="current-password"></div>
+        <div id="authMsg" style="font-size:13px;min-height:18px;margin-bottom:10px;color:var(--rust);"></div>
+        <button class="btn-primary" id="authSignInBtn">Sign in</button>
+        <button class="btn-ghost" id="authSignUpBtn" style="margin-top:10px;">Create account</button>
+        <div style="text-align:center;margin-top:12px;"><a href="#" id="authForgot" style="font-size:12px;color:var(--ink-dim);">Forgot password?</a></div>
+      </div>
+    </div>`;
+    document.body.appendChild(el);
+    const $ = id => el.querySelector(id);
+    const msg = (t, ok) => { const m = $('#authMsg'); m.textContent = t || ''; m.style.color = ok ? 'var(--trail-green)' : 'var(--rust)'; };
+    const busy = on => { $('#authSignInBtn').disabled = on; $('#authSignUpBtn').disabled = on; };
+    const creds = () => ({ email: $('#authEmail').value.trim(), pw: $('#authPass').value });
+    $('#authSignInBtn').addEventListener('click', ()=>{
+      const {email, pw} = creds(); msg(''); busy(true);
+      Promise.resolve(authSignIn(email, pw)).catch(err=> msg(authErrorText(err))).then(()=> busy(false));
+    });
+    $('#authSignUpBtn').addEventListener('click', ()=>{
+      const {email, pw} = creds(); msg(''); busy(true);
+      Promise.resolve(authSignUp(email, pw)).catch(err=> msg(authErrorText(err))).then(()=> busy(false));
+    });
+    $('#authForgot').addEventListener('click', e=>{
+      e.preventDefault();
+      const {email} = creds();
+      if(!email){ msg('Type your email above first.'); return; }
+      Promise.resolve(authReset(email))
+        .then(()=> msg('If that email has an account, a reset link is on its way.', true))
+        .catch(err=> msg(authErrorText(err)));
+    });
+  }
+  el.style.display = 'flex';
+}
+function hideAuthScreen(){
+  const el = document.getElementById('authScreen');
+  if(el) el.style.display = 'none';
+}
+
+// ---- Settings ----
+function cacheSettings(){ try{ localStorage.setItem(cacheKey('settings'), JSON.stringify(settings)); }catch(e){} }
+async function saveSettings(){
+  if(!currentUid) return;
+  cacheSettings();
+  try{ await remoteWriteSettings(settings); }catch(e){ console.error('save settings failed', e); setSyncError(true); }
+}
+
+function legacyLocalList(key){
+  try{
+    const raw = localStorage.getItem('packtrax-cache:'+key);
+    if(raw){ const v = JSON.parse(raw); if(Array.isArray(v)) return v; }
+  }catch(e){}
+  return [];
+}
+function hasLegacyLocalData(){ return CACHE_KEYS.some(k=> legacyLocalList(k).length>0); }
+
+async function importLegacyData(){
+  const sortKey = { walks:'date', daycare:'checkInAt', boarding:'checkInAt', invoices:'createdAt' };
+  const added = {}; let cloudFailed = false, any = 0;
+  for(const k of CACHE_KEYS){
+    let cloud = [];
+    try{ cloud = await legacyCloudLoad(k); }catch(e){ cloudFailed = true; }
+    const map = new Map();
+    cloud.forEach(it=> map.set(it.id, it));
+    legacyLocalList(k).forEach(it=> map.set(it.id, it));
+    state[k].forEach(it=> map.set(it.id, it));          // items already in this account win
+    let merged = Array.from(map.values());
+    if(sortKey[k]) merged.sort((a,b)=> new Date(b[sortKey[k]]) - new Date(a[sortKey[k]]));
+    added[k] = merged.length - state[k].length;
+    any += added[k];
+    state[k] = merged;
+    if(added[k] > 0) saveList(k);
+  }
+  if(any>0 && !settings.venmo && !settings.zelle){
+    settings.venmo = 'tjrichert'; settings.zelle = '651-269-9107';
+    saveSettings();
+  }
+  render();
+  return { added, cloudFailed, any };
+}
+function importSummaryText(r){
+  if(r.any===0) return r.cloudFailed
+    ? "Couldn't read the old data (it may be locked or unavailable) and nothing was found on this phone."
+    : 'No old data found to import.';
+  const a = r.added;
+  return `Imported ${a.dogs} dog(s), ${a.walks} walk(s), ${a.daycare} daycare visit(s), ${a.boarding} boarding stay(s), ${a.invoices} invoice(s).`;
+}
+function maybeOfferLegacyImport(){
+  if(!currentUid) return;
+  const flag = 'packtrax-legacy-offered:' + currentUid;
+  try{ if(localStorage.getItem(flag)) return; }catch(e){ return; }
+  if(state.dogs.length>0 || state.walks.length>0){ try{ localStorage.setItem(flag,'1'); }catch(e){} return; }
+  if(!hasLegacyLocalData()) return;
+  try{ localStorage.setItem(flag,'1'); }catch(e){}
+  if(confirm('We found PackTrax data on this phone from before accounts existed. Import it into this account?')){
+    importLegacyData().then(r=> alert(importSummaryText(r)));
+  }
+}
+
+async function loadState(){
+  if(!currentUid) return;
+  const epoch = authEpoch;
+  let allOk = true;
+  for(const k of CACHE_KEYS){
+    if(isPending(k)){ saveList(k); continue; }   // unsynced local changes win; push them again
+    const v = await remoteLoadList(k);
+    if(epoch !== authEpoch) return;
+    if(v!==null){ state[k] = v; cacheWrite(k, v); }
+    else if(localStorage.getItem(cacheKey(k))===null){ allOk = false; }
+  }
+  try{
+    const st = await remoteLoadSettings();
+    if(epoch !== authEpoch) return;
+    if(st){ settings = Object.assign(defaultSettings(), st); cacheSettings(); }
+  }catch(e){ console.error('settings load failed', e); }
   try{
     const snap = await docRef('activeWalk').get();
     recoveredWalk = snap.exists ? snap.data() : null;
   }catch(e){ recoveredWalk = null; }
+  if(epoch !== authEpoch) return;
+  if(allOk) initialLoadDone = true; else loadFailed = true;
   render();
+  if(allOk) maybeOfferLegacyImport();
 }
 
 async function saveDogs(){ return saveList('dogs'); }
@@ -876,7 +1078,9 @@ function fmtDateTime(d){
 
 function dogById(id){ return state.dogs.find(d=>d.id===id); }
 
+let lastMainTab = 'track';
 function switchTab(tab){
+  if(tab!=='settings') lastMainTab = tab;
   if(activeTab==='history' && tab!=='history' && historyMaps.length){
     historyMaps.forEach(m=>m.remove());
     historyMaps = [];
@@ -888,10 +1092,13 @@ function switchTab(tab){
   }
   activeTab = tab;
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active', t.dataset.tab===tab));
+  const gear = document.getElementById('gearBtn');
+  if(gear) gear.classList.toggle('active', tab==='settings');
   render();
 }
 
 document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click', ()=>switchTab(t.dataset.tab)));
+document.getElementById('gearBtn').addEventListener('click', ()=> switchTab(activeTab==='settings' ? lastMainTab : 'settings'));
 
 function toggleDogSelect(id){
   if(selectedDogIds.includes(id)) selectedDogIds = selectedDogIds.filter(x=>x!==id);
@@ -1963,7 +2170,10 @@ function invRecordDurationLabel(type, r){
   return type==='boarding' ? fmtLongDuration(ms) : fmtTime(ms);
 }
 function invRecordTypeLabel(type){ return type==='walk' ? 'Walk' : (type==='daycare' ? 'Daycare' : 'Boarding'); }
-function invDefaultPrice(type){ return type==='walk' ? 15 : (type==='daycare' ? 25 : 50); }
+function invDefaultPrice(type){
+  const v = type==='walk' ? settings.priceWalk : (type==='daycare' ? settings.priceDaycare : settings.priceBoarding);
+  return (typeof v==='number' && v>=0) ? v : (type==='walk' ? 15 : (type==='daycare' ? 25 : 50));
+}
 function invRecordArray(type){ return type==='walk' ? state.walks : (type==='daycare' ? state.daycare : state.boarding); }
 function invRecordSave(type){ return type==='walk' ? saveWalks : (type==='daycare' ? saveDaycare : saveBoarding); }
 
@@ -2174,7 +2384,7 @@ async function buildInvoiceSnapshotRows(titleDogs, rows){
   let y = padding;
   ctx.fillStyle = '#6a634c';
   ctx.font = '600 13px Inter, sans-serif';
-  ctx.fillText('🐾 PACKTRAX', padding, y);
+  ctx.fillText('🐾 ' + (settings.businessName || 'PackTrax').toUpperCase(), padding, y);
   y += 34;
 
   ctx.fillStyle = '#211f14';
@@ -2266,6 +2476,7 @@ async function buildSavedInvoiceSnapshot(invoice){
 }
 
 function buildVenmoLinkRaw(dogNames, dates, total){
+  if(!settings.venmo) return null;
   const totalStr = total.toFixed(2);
   const sorted = dates.slice().sort((a,b)=>a-b);
   const fmtShort = d => d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
@@ -2273,7 +2484,7 @@ function buildVenmoLinkRaw(dogNames, dates, total){
   const maxStr = fmtShort(sorted[sorted.length-1]);
   const dateRange = minStr===maxStr ? minStr : `${minStr}-${maxStr}`;
   const note = `${dogNames} ${dateRange}`.trim().replace(/\s+/g, '+');
-  return `https://venmo.com/tjrichert?txn=pay&amount=${totalStr}&note=${note}`;
+  return `https://venmo.com/${encodeURIComponent(settings.venmo)}?txn=pay&amount=${totalStr}&note=${note}`;
 }
 
 function buildVenmoLink(items){
@@ -2298,7 +2509,10 @@ function buildVenmoLinkSaved(invoice){
 async function shareInvoiceBlob(blob, venmoLink){
   if(!blob) return;
   const file = new File([blob], 'invoice.png', {type:'image/png'});
-  const text = `Pay with Zelle: 651-269-9107\nPay with Venmo: ${venmoLink}`;
+  const payLines = [];
+  if(settings.zelle) payLines.push('Pay with Zelle: ' + settings.zelle);
+  if(venmoLink) payLines.push('Pay with Venmo: ' + venmoLink);
+  const text = payLines.join('\n');
   if(navigator.canShare && navigator.canShare({files:[file]})){
     await navigator.share({ files:[file], title:'PackTrax invoice', text });
   } else if(navigator.share){
@@ -2618,7 +2832,7 @@ function renderHistory(container){
       html += `<div class="walk-card">
         ${statusDotHtml('daycare', s.id)}
         <div class="walk-card-header" data-toggle="${s.id}">
-          <span class="paw-icon">🏠</span>
+          <span class="paw-icon">🐕🐕</span>
           <div class="walk-summary">
             <div class="walk-top">
               <div class="walk-date">${inDateStr}</div>
@@ -2675,7 +2889,7 @@ function renderHistory(container){
       html += `<div class="walk-card">
         ${statusDotHtml('boarding', s.id)}
         <div class="walk-card-header" data-toggle="${s.id}">
-          <span class="paw-icon">🧳</span>
+          <span class="paw-icon">🏠</span>
           <div class="walk-summary">
             <div class="walk-top">
               <div class="walk-date">${inDateStr}</div>
@@ -2968,17 +3182,81 @@ function escapeHtml(s){
   return div.innerHTML;
 }
 
+function renderSettings(container){
+  const esc = x => String(x==null?'':x).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+  container.innerHTML = `
+  <div class="card">
+    <div class="settings-h">Your business</div>
+    <div class="field"><label>Business name (shown on invoices)</label><input id="setBiz" type="text" value="${esc(settings.businessName)}" placeholder="e.g. Happy Tails Dog Care"></div>
+    <div class="field"><label>Venmo username</label><input id="setVenmo" type="text" value="${esc(settings.venmo)}" placeholder="username, no @" autocapitalize="none"></div>
+    <div class="field"><label>Zelle phone or email</label><input id="setZelle" type="text" value="${esc(settings.zelle)}" placeholder="phone number or email" autocapitalize="none"></div>
+    <div class="settings-note">Venmo and Zelle show up in the message that goes with each shared invoice. Leave one blank to leave it out.</div>
+  </div>
+  <div class="card">
+    <div class="settings-h">Default prices</div>
+    <div class="field"><label>Walk ($)</label><input id="setPWalk" type="number" step="0.01" min="0" value="${esc(settings.priceWalk)}"></div>
+    <div class="field"><label>Daycare ($)</label><input id="setPDay" type="number" step="0.01" min="0" value="${esc(settings.priceDaycare)}"></div>
+    <div class="field"><label>Boarding ($)</label><input id="setPBoard" type="number" step="0.01" min="0" value="${esc(settings.priceBoarding)}"></div>
+    <div class="settings-note">Used as the starting price when you build an invoice. You can still change each line.</div>
+  </div>
+  <div class="card">
+    <div class="settings-h">Account</div>
+    <div style="font-size:14px;margin-bottom:12px;">Signed in as <strong>${esc(currentEmail||'')}</strong></div>
+    <button class="btn-ghost" id="signOutBtn">Sign out</button>
+  </div>
+  <div class="card">
+    <div class="settings-h">Import original data</div>
+    <div class="settings-note" style="margin-top:0;margin-bottom:12px;">Only for the PackTrax data created before accounts existed. It is added to this account and nothing already here is replaced.</div>
+    <button class="btn-ghost" id="importLegacyBtn">Import old data</button>
+    <div id="importStatus" class="settings-note"></div>
+  </div>`;
+
+  const num = (v, d) => { const n = parseFloat(v); return (isFinite(n) && n>=0) ? n : d; };
+  const bind = (id, fn) => { const el = container.querySelector(id); if(el) el.addEventListener('change', ()=>{ fn(el); saveSettings(); }); };
+  bind('#setBiz',  el=>{ settings.businessName = el.value.trim(); });
+  bind('#setVenmo',el=>{ settings.venmo = el.value.trim().replace(/^@/,''); el.value = settings.venmo; });
+  bind('#setZelle',el=>{ settings.zelle = el.value.trim(); });
+  bind('#setPWalk', el=>{ settings.priceWalk = num(el.value, 15);  el.value = settings.priceWalk; });
+  bind('#setPDay',  el=>{ settings.priceDaycare = num(el.value, 25); el.value = settings.priceDaycare; });
+  bind('#setPBoard',el=>{ settings.priceBoarding = num(el.value, 50); el.value = settings.priceBoarding; });
+
+  const so = container.querySelector('#signOutBtn');
+  if(so) so.addEventListener('click', ()=>{
+    if(timerRunning || reviewing){ alert('Finish or save your current walk before signing out.'); return; }
+    if(confirm('Sign out of PackTrax on this phone?')) authSignOut();
+  });
+  const ib = container.querySelector('#importLegacyBtn');
+  if(ib) ib.addEventListener('click', async ()=>{
+    if(!confirm('Import the original PackTrax data into this account?')) return;
+    ib.disabled = true;
+    const st = container.querySelector('#importStatus'); if(st) st.textContent = 'Importing…';
+    const r = await importLegacyData();
+    ib.disabled = false;
+    const st2 = container.querySelector('#importStatus'); if(st2) st2.textContent = importSummaryText(r);
+  });
+}
+
 function render(){
   const container = document.getElementById('content');
+  if(currentUid && !initialLoadDone){
+    container.innerHTML = `<div class="card"><div class="empty"><div class="empty-title">Loading your data…</div>${loadFailed ? `Couldn't reach the cloud yet.<br><button class="btn-primary" id="retryLoadBtn" style="margin-top:12px;">Try again</button>` : ''}</div></div>`;
+    const rb = container.querySelector('#retryLoadBtn');
+    if(rb) rb.addEventListener('click', ()=>{ loadFailed = false; render(); loadState(); });
+    return;
+  }
   if(activeTab==='track') renderTrack(container);
   else if(activeTab==='dogs') renderDogs(container);
   else if(activeTab==='history') renderHistory(container);
   else if(activeTab==='invoice') renderInvoicesTab(container);
+  else if(activeTab==='settings') renderSettings(container);
 }
 
-hydrateFromCache();  // last known data, instantly
-render();      // draw immediately, don't wait on the network
-loadState();   // then fetch real data in the background and re-render
+try{ currentUid = localStorage.getItem('packtrax-lastuid') || null; }catch(e){ currentUid = null; }
+hydrateFromCache();       // last signed-in user's data, instantly
+initialLoadDone = currentUid ? hasAnyCache() : false;
+render();
+if(!currentUid) showAuthScreen();
+startAuth();              // confirms who is signed in, then loads from the cloud
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('sw.js').catch(err=>console.log('SW registration failed', err));
