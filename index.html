@@ -279,6 +279,7 @@ let reviewing = false; // showing the review screen — tracking keeps running u
 let selectedDogIds = [];
 let historyFilter = 'all';
 let historyTypeFilter = 'all';   // 'all' | 'walk' | 'daycare' | 'boarding'
+let historyStatusFilter = 'all'; // 'all' | 'none' (red) | 'pending' (orange) | 'paid' (green)
 let historyPanel = null;         // null | 'filter' | 'stats' | 'invoice'
 let expandedWalks = new Set();
 let editingWalkId = null;
@@ -681,20 +682,6 @@ function authErrorText(err){
   return map[c] || ('Something went wrong (' + (c || 'unknown') + ').');
 }
 
-// ---- The original shared (pre-accounts) data ----
-async function legacyCloudLoad(key){
-  const ref = k => db.collection('packtrax').doc(k);
-  const snap = await ref(key).get();
-  if(!snap.exists) return [];
-  const d = snap.data() || {};
-  let items = d.items || [];
-  const n = d.chunks || 1;
-  for(let i=1;i<n;i++){
-    const s2 = await ref(chunkDocKey(key,i)).get();
-    if(s2.exists) items = items.concat((s2.data()||{}).items || []);
-  }
-  return items;
-}
 
 // ---- Local cache: draw the last known data instantly, refresh from Firebase after ----
 function cacheKey(key){ return 'packtrax-cache:' + currentUid + ':' + key; }
@@ -802,7 +789,7 @@ function resetState(){
   selectedDogIds = []; recoveredWalk = null;
   expandedWalks = new Set();
   invoiceSelection = new Set(); invoicePrices = {}; invoiceViewOpen = null; invoiceAddPicker = false;
-  historyFilter = 'all'; historyTypeFilter = 'all'; historyPanel = null;
+  historyFilter = 'all'; historyTypeFilter = 'all'; historyStatusFilter = 'all'; historyPanel = null;
 }
 
 function onSignedIn(uid, email){
@@ -850,6 +837,7 @@ function showAuthScreen(){
         <button class="btn-ghost" id="authSignUpBtn" style="margin-top:10px;">Create account</button>
         <div style="text-align:center;margin-top:12px;"><a href="#" id="authForgot" style="font-size:12px;color:var(--ink-dim);">Forgot password?</a></div>
       </div>
+      <div style="text-align:center;margin-top:14px;font-size:12px;"><a class="privacy-link" href="privacy.html" target="_blank" rel="noopener" style="color:var(--parchment);opacity:.8;">Privacy policy</a></div>
     </div>`;
     document.body.appendChild(el);
     const $ = id => el.querySelector(id);
@@ -888,58 +876,6 @@ async function saveSettings(){
   try{ await remoteWriteSettings(settings); }catch(e){ console.error('save settings failed', e); setSyncError(true); }
 }
 
-function legacyLocalList(key){
-  try{
-    const raw = localStorage.getItem('packtrax-cache:'+key);
-    if(raw){ const v = JSON.parse(raw); if(Array.isArray(v)) return v; }
-  }catch(e){}
-  return [];
-}
-function hasLegacyLocalData(){ return CACHE_KEYS.some(k=> legacyLocalList(k).length>0); }
-
-async function importLegacyData(){
-  const sortKey = { walks:'date', daycare:'checkInAt', boarding:'checkInAt', invoices:'createdAt' };
-  const added = {}; let cloudFailed = false, any = 0;
-  for(const k of CACHE_KEYS){
-    let cloud = [];
-    try{ cloud = await legacyCloudLoad(k); }catch(e){ cloudFailed = true; }
-    const map = new Map();
-    cloud.forEach(it=> map.set(it.id, it));
-    legacyLocalList(k).forEach(it=> map.set(it.id, it));
-    state[k].forEach(it=> map.set(it.id, it));          // items already in this account win
-    let merged = Array.from(map.values());
-    if(sortKey[k]) merged.sort((a,b)=> new Date(b[sortKey[k]]) - new Date(a[sortKey[k]]));
-    added[k] = merged.length - state[k].length;
-    any += added[k];
-    state[k] = merged;
-    if(added[k] > 0) saveList(k);
-  }
-  if(any>0 && !settings.venmo && !settings.zelle){
-    settings.venmo = 'tjrichert'; settings.zelle = '651-269-9107';
-    saveSettings();
-  }
-  render();
-  return { added, cloudFailed, any };
-}
-function importSummaryText(r){
-  if(r.any===0) return r.cloudFailed
-    ? "Couldn't read the old data (it may be locked or unavailable) and nothing was found on this phone."
-    : 'No old data found to import.';
-  const a = r.added;
-  return `Imported ${a.dogs} dog(s), ${a.walks} walk(s), ${a.daycare} daycare visit(s), ${a.boarding} boarding stay(s), ${a.invoices} invoice(s).`;
-}
-function maybeOfferLegacyImport(){
-  if(!currentUid) return;
-  const flag = 'packtrax-legacy-offered:' + currentUid;
-  try{ if(localStorage.getItem(flag)) return; }catch(e){ return; }
-  if(state.dogs.length>0 || state.walks.length>0){ try{ localStorage.setItem(flag,'1'); }catch(e){} return; }
-  if(!hasLegacyLocalData()) return;
-  try{ localStorage.setItem(flag,'1'); }catch(e){}
-  if(confirm('We found PackTrax data on this phone from before accounts existed. Import it into this account?')){
-    importLegacyData().then(r=> alert(importSummaryText(r)));
-  }
-}
-
 async function loadState(){
   if(!currentUid) return;
   const epoch = authEpoch;
@@ -963,7 +899,6 @@ async function loadState(){
   if(epoch !== authEpoch) return;
   if(allOk) initialLoadDone = true; else loadFailed = true;
   render();
-  if(allOk) maybeOfferLegacyImport();
 }
 
 async function saveDogs(){ return saveList('dogs'); }
@@ -2194,6 +2129,9 @@ function taskStatus(type, id){
   }
   return status;
 }
+function statusMatches(type, id){ return historyStatusFilter==='all' || taskStatus(type, id)===historyStatusFilter; }
+const STATUS_LABELS = { none:'Not invoiced', pending:'Awaiting payment', paid:'Paid' };
+const STATUS_COLORS = { none:'#d64545', pending:'#e8962e', paid:'#3f9b57' };
 function statusDotHtml(type, id){
   const st = taskStatus(type, id);
   const label = {none:'Not on an invoice', pending:'On an invoice, awaiting payment', paid:'Paid'}[st];
@@ -2615,7 +2553,7 @@ function renderInvoicesTab(container){
 
 function renderHistoryStatsHtml(){
   const recs = getInvoiceableRecords().filter(x=>
-    (historyTypeFilter==='all' || x.type===historyTypeFilter) &&
+    (historyTypeFilter==='all' || x.type===historyTypeFilter) && statusMatches(x.type, x.id) &&
     (historyFilter==='all' || x.record.dogIds.includes(historyFilter))
   );
   const walkRecs = recs.filter(x=>x.type==='walk').map(x=>x.record);
@@ -2627,7 +2565,7 @@ function renderHistoryStatsHtml(){
   const totalPoop = walkRecs.reduce((a,w)=>a+(w.poop||0),0);
 
   const dogLabel = historyFilter==='all' ? 'All dogs' : (dogById(historyFilter) ? dogById(historyFilter).name : '(removed dog)');
-  const typeLabel = historyTypeFilter==='all' ? 'all tasks' : invRecordTypeLabel(historyTypeFilter).toLowerCase()+'s';
+  const typeLabel = (historyTypeFilter==='all' ? 'all tasks' : invRecordTypeLabel(historyTypeFilter).toLowerCase()+'s') + (historyStatusFilter==='all' ? '' : ' · ' + STATUS_LABELS[historyStatusFilter].toLowerCase());
 
   let html = `<div class="card"><div style="font-size:12px;color:var(--ink-dim);">Showing stats for: <strong style="color:var(--ink);">${dogLabel}</strong> · ${typeLabel}</div></div>`;
 
@@ -2692,7 +2630,7 @@ function renderHistoryInvoiceHtml(){
   }
 
   const items = everything
-    .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter))
+    .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter) && statusMatches(x.type, x.id))
     .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
 
   let html = '';
@@ -2774,10 +2712,11 @@ function renderHistory(container){
     html += `<div class="status-legend"><span><i style="background:#d64545"></i>Not invoiced</span><span><i style="background:#e8962e"></i>Awaiting payment</span><span><i style="background:#3f9b57"></i>Paid</span></div>`;
   }
 
-  if(historyPanel!=='filter' && (historyFilter!=='all' || historyTypeFilter!=='all')){
+  if(historyPanel!=='filter' && (historyFilter!=='all' || historyTypeFilter!=='all' || historyStatusFilter!=='all')){
     const dogLabel = historyFilter==='all' ? null : (dogById(historyFilter) ? dogById(historyFilter).name : '(removed dog)');
     const typeLabel = historyTypeFilter==='all' ? null : invRecordTypeLabel(historyTypeFilter)+'s';
-    const parts = [dogLabel, typeLabel].filter(Boolean);
+    const statusLabel = historyStatusFilter==='all' ? null : STATUS_LABELS[historyStatusFilter];
+    const parts = [dogLabel, typeLabel, statusLabel].filter(Boolean);
     html += `<div class="active-filter-chip" id="clearHistoryFilterChip">Filtering: ${parts.join(' · ')} ✕</div>`;
   }
 
@@ -2798,13 +2737,21 @@ function renderHistory(container){
       html += `<div class="chip ${sel?'selected':''}" style="background:${sel?'var(--blaze-blue)':'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-hfilter-type="${val}">${label}</div>`;
     });
     html += `</div>
+      <label style="font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);margin-top:14px;display:block;">Filter by payment status</label>
+      <div class="dog-picker" style="margin-top:8px;">`;
+    [['all','All'],['none','Not invoiced'],['pending','Awaiting payment'],['paid','Paid']].forEach(([val,label])=>{
+      const sel = historyStatusFilter===val;
+      const dot = val==='all' ? '' : `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${STATUS_COLORS[val]};border:1.5px solid rgba(255,255,255,0.7);margin-right:7px;vertical-align:-1px;"></span>`;
+      html += `<div class="chip ${sel?'selected':''}" style="background:${sel?'var(--ink)':'var(--parchment-dim)'};color:${sel?'#fff':'var(--ink)'}" data-hfilter-status="${val}">${dot}${label}</div>`;
+    });
+    html += `</div>
       <button class="btn-ghost" id="historyFilterDoneBtn" style="margin-top:14px;width:100%;">Done</button>
     </div>`;
   }
 
-  const walks = state.walks.filter(w => (historyFilter==='all' || w.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='walk'));
-  const daycareItems = state.daycare.filter(s => (historyFilter==='all' || s.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='daycare'));
-  const boardingItems = state.boarding.filter(s => (historyFilter==='all' || s.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='boarding'));
+  const walks = state.walks.filter(w => (historyFilter==='all' || w.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='walk') && statusMatches('walk', w.id));
+  const daycareItems = state.daycare.filter(s => (historyFilter==='all' || s.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='daycare') && statusMatches('daycare', s.id));
+  const boardingItems = state.boarding.filter(s => (historyFilter==='all' || s.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || historyTypeFilter==='boarding') && statusMatches('boarding', s.id));
   const combined = [
     ...walks.map(w => ({ type:'walk', sortDate:w.date, data:w })),
     ...daycareItems.map(s => ({ type:'daycare', sortDate:s.checkInAt, data:s })),
@@ -3023,10 +2970,11 @@ function renderHistory(container){
   const iBtn = container.querySelector('#historyInvoiceBtn');
   if(iBtn) iBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='invoice' ? null : 'invoice'; invoiceSelection = new Set(); invoicePrices = {}; invoiceAddPicker = false; render(); });
   const clearChip = container.querySelector('#clearHistoryFilterChip');
-  if(clearChip) clearChip.addEventListener('click', ()=>{ historyFilter='all'; historyTypeFilter='all'; render(); });
+  if(clearChip) clearChip.addEventListener('click', ()=>{ historyFilter='all'; historyTypeFilter='all'; historyStatusFilter='all'; render(); });
 
   container.querySelectorAll('[data-hfilter-dog]').forEach(c=>c.addEventListener('click', ()=>{ historyFilter=c.dataset.hfilterDog; render(); }));
   container.querySelectorAll('[data-hfilter-type]').forEach(c=>c.addEventListener('click', ()=>{ historyTypeFilter=c.dataset.hfilterType; render(); }));
+  container.querySelectorAll('[data-hfilter-status]').forEach(c=>c.addEventListener('click', ()=>{ historyStatusFilter=c.dataset.hfilterStatus; render(); }));
   const filterDoneBtn = container.querySelector('#historyFilterDoneBtn');
   if(filterDoneBtn) filterDoneBtn.addEventListener('click', ()=>{ historyPanel=null; render(); });
 
@@ -3034,7 +2982,7 @@ function renderHistory(container){
   if(statsDoneBtn) statsDoneBtn.addEventListener('click', ()=>{ historyPanel=null; render(); });
 
   const invItems = getInvoiceableRecords()
-    .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter))
+    .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter) && statusMatches(x.type, x.id))
     .filter(x => taskStatus(x.type,x.id)==='none')
     .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
   const selectAllInv = container.querySelector('#selectAllInv');
@@ -3203,12 +3151,7 @@ function renderSettings(container){
     <div class="settings-h">Account</div>
     <div style="font-size:14px;margin-bottom:12px;">Signed in as <strong>${esc(currentEmail||'')}</strong></div>
     <button class="btn-ghost" id="signOutBtn">Sign out</button>
-  </div>
-  <div class="card">
-    <div class="settings-h">Import original data</div>
-    <div class="settings-note" style="margin-top:0;margin-bottom:12px;">Only for the PackTrax data created before accounts existed. It is added to this account and nothing already here is replaced.</div>
-    <button class="btn-ghost" id="importLegacyBtn">Import old data</button>
-    <div id="importStatus" class="settings-note"></div>
+    <div class="settings-note"><a class="privacy-link" href="privacy.html" target="_blank" rel="noopener">Privacy policy</a></div>
   </div>`;
 
   const num = (v, d) => { const n = parseFloat(v); return (isFinite(n) && n>=0) ? n : d; };
@@ -3224,15 +3167,6 @@ function renderSettings(container){
   if(so) so.addEventListener('click', ()=>{
     if(timerRunning || reviewing){ alert('Finish or save your current walk before signing out.'); return; }
     if(confirm('Sign out of PackTrax on this phone?')) authSignOut();
-  });
-  const ib = container.querySelector('#importLegacyBtn');
-  if(ib) ib.addEventListener('click', async ()=>{
-    if(!confirm('Import the original PackTrax data into this account?')) return;
-    ib.disabled = true;
-    const st = container.querySelector('#importStatus'); if(st) st.textContent = 'Importing…';
-    const r = await importLegacyData();
-    ib.disabled = false;
-    const st2 = container.querySelector('#importStatus'); if(st2) st2.textContent = importSummaryText(r);
   });
 }
 
