@@ -622,29 +622,39 @@ function docRef(key){
   return db.collection('users').doc(currentUid).collection('data').doc(key);
 }
 
-async function remoteLoadList(key){
+// One tiny "meta" document tells every device which version of each list is in the cloud
+async function remoteGetMeta(){
+  const snap = await docRef('meta').get();
+  return snap.exists ? (snap.data() || {}) : {};
+}
+async function remoteLoadList(key, meta){
   try{
     const snap = await docRef(key).get();
-    if(!snap.exists) return [];
-    const d = snap.data() || {};
-    let items = d.items || [];
-    const n = d.chunks || 1;
+    if(!snap.exists) return { items: [], fmt2: false };
+    const d0 = snap.data() || {};
+    const fmt2 = d0.fmt === 2;
+    const n = (meta && meta.counts && meta.counts[key]) || d0.chunks || 1;
+    let items = d0.items || [];
     for(let i=1;i<n;i++){
       const s2 = await docRef(chunkDocKey(key,i)).get();
       if(!s2.exists) throw new Error('missing chunk '+i+' of '+key);
       items = items.concat((s2.data()||{}).items || []);
     }
+    if(fmt2 && REVERSED[key]) items = items.slice().reverse();
     setKnownChunkCount(key, n);
-    return items;
+    return { items, fmt2 };
   }catch(e){
     console.error('load failed for', key, e);
     return null;   // null = load failed, keep whatever we have cached
   }
 }
-async function remoteWriteList(key, chunks, prevCount){
+// Writes only the chunks listed in writeIdx, plus the meta doc, in one atomic batch
+async function remoteWriteList(key, chunks, writeIdx, prevCount, ver){
   const batch = db.batch();
-  chunks.forEach((c,i)=> batch.set(docRef(chunkDocKey(key,i)), { items:c, chunks:chunks.length, savedAt:new Date().toISOString() }));
+  const now = new Date().toISOString();
+  writeIdx.forEach(i=> batch.set(docRef(chunkDocKey(key,i)), { items:chunks[i], fmt:2, savedAt:now }));
   for(let i=chunks.length;i<prevCount;i++) batch.delete(docRef(chunkDocKey(key,i)));
+  batch.set(docRef('meta'), { versions:{[key]:ver}, counts:{[key]:chunks.length}, updatedAt:now }, { merge:true });
   await batch.commit();
 }
 async function remoteLoadSettings(){
@@ -723,6 +733,31 @@ function chunkItems(items){
   return chunks;
 }
 function chunkDocKey(key, i){ return i===0 ? key : key+'_'+i; }
+
+// Lists that grow at the front (newest first) are stored oldest-first, so a new item only touches the last chunk
+const REVERSED = { walks:true, daycare:true, boarding:true, invoices:true };
+function storedOrder(key, items){ return REVERSED[key] ? items.slice().reverse() : items; }
+function chunkHash(chunk){
+  const str = JSON.stringify(chunk);
+  let h = 2166136261;
+  for(let i=0;i<str.length;i++){ h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h>>>0).toString(36) + ':' + str.length;
+}
+function hashesFor(key, items){ return chunkItems(storedOrder(key, items)).map(chunkHash); }
+function getVer(key){ try{ return localStorage.getItem('packtrax-ver:'+currentUid+':'+key); }catch(e){ return null; } }
+function setVer(key, v){ try{ localStorage.setItem('packtrax-ver:'+currentUid+':'+key, v); }catch(e){} }
+function getHashes(key){
+  try{ const r = localStorage.getItem('packtrax-hashes:'+currentUid+':'+key); return r ? JSON.parse(r) : null; }
+  catch(e){ return null; }
+}
+function setHashes(key, h){ try{ localStorage.setItem('packtrax-hashes:'+currentUid+':'+key, JSON.stringify(h)); }catch(e){} }
+function clearSync(key){
+  try{
+    localStorage.removeItem('packtrax-ver:'+currentUid+':'+key);
+    localStorage.removeItem('packtrax-hashes:'+currentUid+':'+key);
+  }catch(e){}
+}
+function newVersion(){ return Date.now().toString(36) + Math.random().toString(36).slice(2,6); }
 function knownChunkCount(key){
   try{ return parseInt(localStorage.getItem('packtrax-chunks:'+currentUid+':'+key) || '1', 10) || 1; }catch(e){ return 1; }
 }
@@ -766,9 +801,30 @@ function saveList(key){
 async function writeListNow(key, epoch){
   if(!currentUid || epoch!==authEpoch) return;
   try{
-    const chunks = chunkItems(state[key]);
-    await remoteWriteList(key, chunks, knownChunkCount(key));
+    const chunks = chunkItems(storedOrder(key, state[key]));
+    const hashes = chunks.map(chunkHash);
+    let prevCount = knownChunkCount(key);
+    let writeIdx = chunks.map((_,i)=>i);          // default: rewrite everything (always safe)
+    const last = getHashes(key);
+    if(last){
+      // Only write just the changed chunks if nobody else changed this list since we last synced
+      let meta = null;
+      try{ meta = await remoteGetMeta(); }catch(e){}
+      const remoteVer = meta && meta.versions && meta.versions[key];
+      if(remoteVer && remoteVer === getVer(key)){
+        writeIdx = writeIdx.filter(i=> last[i] !== hashes[i]);
+      } else if(meta && meta.counts && meta.counts[key]){
+        prevCount = Math.max(prevCount, meta.counts[key]);
+      }
+    }
+    if(writeIdx.length===0 && chunks.length===prevCount){
+      setPending(key, false); setSyncError(false);
+      return;                                        // nothing actually changed
+    }
+    const ver = newVersion();
+    await remoteWriteList(key, chunks, writeIdx, prevCount, ver);
     setKnownChunkCount(key, chunks.length);
+    setVer(key, ver); setHashes(key, hashes);
     setPending(key, false);
     setSyncError(false);
   }catch(e){
@@ -880,23 +936,44 @@ async function loadState(){
   if(!currentUid) return;
   const epoch = authEpoch;
   let allOk = true;
+  // One small read tells us which lists changed in the cloud since this phone last synced
+  let meta = null, metaOk = true;
+  try{ meta = await remoteGetMeta(); }catch(e){ metaOk = false; }
+  if(epoch !== authEpoch) return;
   for(const k of CACHE_KEYS){
-    if(isPending(k)){ saveList(k); continue; }   // unsynced local changes win; push them again
-    const v = await remoteLoadList(k);
+    if(isPending(k)){ saveList(k); continue; }      // unsynced local changes win; push them again
+    const haveCache = localStorage.getItem(cacheKey(k))!==null;
+    const remoteVer = meta && meta.versions && meta.versions[k];
+    if(metaOk && remoteVer && haveCache && remoteVer === getVer(k)) continue;   // cache is already current
+    if(!metaOk && haveCache) continue;                                           // offline: use the cache
+    const r = await remoteLoadList(k, meta);
     if(epoch !== authEpoch) return;
-    if(v!==null){ state[k] = v; cacheWrite(k, v); }
-    else if(localStorage.getItem(cacheKey(k))===null){ allOk = false; }
+    if(r){
+      state[k] = r.items; cacheWrite(k, r.items);
+      if(r.fmt2 && remoteVer){ setVer(k, remoteVer); setHashes(k, hashesFor(k, r.items)); }
+      else{
+        clearSync(k);
+        saveList(k);   // one-time conversion to the new layout (also registers empty lists)
+      }
+    } else if(!haveCache){ allOk = false; }
   }
   try{
     const st = await remoteLoadSettings();
     if(epoch !== authEpoch) return;
     if(st){ settings = Object.assign(defaultSettings(), st); cacheSettings(); }
   }catch(e){ console.error('settings load failed', e); }
+  let remoteWalk = null;
   try{
     const snap = await docRef('activeWalk').get();
-    recoveredWalk = snap.exists ? snap.data() : null;
-  }catch(e){ recoveredWalk = null; }
+    remoteWalk = snap.exists ? snap.data() : null;
+  }catch(e){ remoteWalk = null; }
   if(epoch !== authEpoch) return;
+  let clearedAt = '';
+  try{ clearedAt = localStorage.getItem('packtrax-active-cleared:' + currentUid) || ''; }catch(e){}
+  const candidates = [remoteWalk, readLocalActive()]
+    .filter(x=> x && x.savedAt && x.savedAt > clearedAt)
+    .sort((a,b)=> b.savedAt.localeCompare(a.savedAt));
+  recoveredWalk = candidates[0] || null;
   if(allOk) initialLoadDone = true; else loadFailed = true;
   render();
 }
@@ -908,7 +985,17 @@ async function saveBoarding(){ return saveList('boarding'); }
 async function saveInvoices(){ return saveList('invoices'); }
 
 // ---- Crash/close recovery for an in-progress walk ----
-async function saveActiveWalkState(){
+// A copy of the live walk is also kept on the phone itself: instant and reliable even while the app is closing
+function activeLocalKey(){ return 'packtrax-active:' + currentUid; }
+function writeLocalActive(snap){
+  if(!currentUid) return;
+  try{ localStorage.setItem(activeLocalKey(), JSON.stringify(snap)); }catch(e){}
+}
+function readLocalActive(){
+  try{ const r = localStorage.getItem(activeLocalKey()); return r ? JSON.parse(r) : null; }catch(e){ return null; }
+}
+let lastActiveCloudWrite = 0;
+async function saveActiveWalkState(opts){
   if(!timerRunning) return;
   const snapshot = {
     selectedDogIds: [...selectedDogIds],
@@ -918,16 +1005,32 @@ async function saveActiveWalkState(){
     draftNote, draftDistance, draftDistanceIsAuto,
     savedAt: new Date().toISOString()
   };
+  writeLocalActive(snapshot);
+  const now = Date.now();
+  // switching apps repeatedly shouldn't spam the cloud: at most one cloud save a minute that way
+  if(opts && opts.onlyIfStale && now - lastActiveCloudWrite < 60000) return;
+  lastActiveCloudWrite = now;
   try{ await docRef('activeWalk').set(snapshot); }
   catch(e){ console.warn('walk autosave failed', e); }
 }
 async function clearActiveWalkState(){
+  if(currentUid){
+    try{
+      localStorage.removeItem(activeLocalKey());
+      localStorage.setItem('packtrax-active-cleared:' + currentUid, new Date().toISOString());
+    }catch(e){}
+  }
   try{ await docRef('activeWalk').delete(); }
   catch(e){ /* nothing to clean up */ }
 }
+
+// Save the live walk the moment the app is switched away from or put in the background
+function saveOnBackground(){ if(timerRunning) saveActiveWalkState({ onlyIfStale:true }); }
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') saveOnBackground(); });
+window.addEventListener('pagehide', saveOnBackground);
 function startAutosave(){
   if(autosaveIntervalId) clearInterval(autosaveIntervalId);
-  autosaveIntervalId = setInterval(saveActiveWalkState, 60000);
+  autosaveIntervalId = setInterval(saveActiveWalkState, 300000);   // every 5 minutes
   saveActiveWalkState();
 }
 function stopAutosave(){
