@@ -3233,6 +3233,58 @@ function escapeHtml(s){
   return div.innerHTML;
 }
 
+// ---- Export history to CSV ----
+function csvCell(v){
+  if(v===null || v===undefined) return '';
+  let t = String(v);
+  if(/^[=+\-@\t\r]/.test(t) && isNaN(Number(t))) t = "'" + t;   // stop spreadsheets from running notes as formulas
+  return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+}
+function csvDate(d){ const p = n=>String(n).padStart(2,'0'); return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate()); }
+function csvTime(d){ const p = n=>String(n).padStart(2,'0'); return p(d.getHours())+':'+p(d.getMinutes()); }
+function buildHistoryCsv(){
+  const header = ['Type','Date','Time','Duration (min)','Dogs','Distance (mi)','Pees','Poops','Boarding type','Check-out','Notes','Price','Invoice status','Invoice date'];
+  const recs = [
+    ...state.walks.map(r=>({ type:'walk', r })),
+    ...state.daycare.map(r=>({ type:'daycare', r })),
+    ...state.boarding.map(r=>({ type:'boarding', r }))
+  ].sort((a,b)=> invRecordDate(a.type,a.r) - invRecordDate(b.type,b.r));
+  const statusText = { none:'Not invoiced', pending:'Awaiting payment', paid:'Paid' };
+  const lines = [header.map(csvCell).join(',')];
+  recs.forEach(({type, r})=>{
+    const when = invRecordDate(type, r);
+    const ms = invRecordDurationMs(type, r);
+    const names = (r.dogIds||[]).map(id=>{ const d = dogById(id); return d ? d.name : '(removed dog)'; }).join(' & ');
+    const inv = state.invoices.find(i=> i.items.some(it=> it.type===type && it.recordId===r.id));
+    const invItem = inv ? inv.items.find(it=> it.type===type && it.recordId===r.id) : null;
+    const price = invItem ? invItem.price : (r.price!=null ? r.price : '');
+    const isWalk = type==='walk';
+    lines.push([
+      invRecordTypeLabel(type),
+      csvDate(when),
+      csvTime(when),
+      ms!=null ? Math.round(ms/6000)/10 : '',
+      names,
+      isWalk && r.distance!=null ? r.distance : '',
+      isWalk ? (r.pee||0) : '',
+      isWalk ? (r.poop||0) : '',
+      type==='boarding' ? (r.boardingType||'') : '',
+      !isWalk && r.checkOutAt ? csvDate(new Date(r.checkOutAt)) + ' ' + csvTime(new Date(r.checkOutAt)) : '',
+      isWalk ? (r.note||'') : '',
+      price,
+      statusText[taskStatus(type, r.id)],
+      inv ? csvDate(new Date(inv.createdAt)) : ''
+    ].map(csvCell).join(','));
+  });
+  return { csv: '\ufeff' + lines.join('\r\n') + '\r\n', count: recs.length };
+}
+function exportHistoryCsv(){
+  const { csv, count } = buildHistoryCsv();
+  if(count===0) return 0;
+  downloadBlob(new Blob([csv], { type:'text/csv;charset=utf-8' }), 'packtrax-history-' + csvDate(new Date()) + '.csv');
+  return count;
+}
+
 function renderSettings(container){
   const esc = x => String(x==null?'':x).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
   container.innerHTML = `
@@ -3251,6 +3303,11 @@ function renderSettings(container){
     <div class="settings-note">Used as the starting price when you build an invoice. You can still change each line.</div>
   </div>
   <div class="card">
+    <div class="settings-h">Export</div>
+    <button class="btn-primary" id="exportCsvBtn">Export history to CSV</button>
+    <div class="settings-note" id="exportStatus">Every walk, daycare visit and boarding stay with dogs, times, prices and payment status. Opens in Excel or Google Sheets.</div>
+  </div>
+  <div class="card">
     <div class="settings-h">Account</div>
     <div style="font-size:14px;margin-bottom:12px;">Signed in as <strong>${esc(currentEmail||'')}</strong></div>
     <button class="btn-ghost" id="signOutBtn">Sign out</button>
@@ -3265,6 +3322,13 @@ function renderSettings(container){
   bind('#setPWalk', el=>{ settings.priceWalk = num(el.value, 15);  el.value = settings.priceWalk; });
   bind('#setPDay',  el=>{ settings.priceDaycare = num(el.value, 25); el.value = settings.priceDaycare; });
   bind('#setPBoard',el=>{ settings.priceBoarding = num(el.value, 50); el.value = settings.priceBoarding; });
+
+  const ex = container.querySelector('#exportCsvBtn');
+  if(ex) ex.addEventListener('click', ()=>{
+    const n = exportHistoryCsv();
+    const st = container.querySelector('#exportStatus');
+    if(st) st.textContent = n>0 ? 'Exported ' + n + ' record' + (n!==1?'s':'') + '. Check your Downloads folder.' : 'Nothing to export yet.';
+  });
 
   const so = container.querySelector('#signOutBtn');
   if(so) so.addEventListener('click', ()=>{
