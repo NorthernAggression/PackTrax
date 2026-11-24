@@ -166,6 +166,10 @@
   .invoice-total-row span:last-child{font-family:'JetBrains Mono',monospace;font-size:22px;}
   .select-all-row{padding:12px 16px;display:flex;align-items:center;gap:10px;}
   .select-all-row label{font-size:12px;text-transform:uppercase;letter-spacing:0.05em;color:var(--parchment);cursor:pointer;}
+  .invoice-bar{position:sticky;bottom:0;z-index:20;margin:14px -18px 0;padding:12px 18px calc(12px + env(safe-area-inset-bottom,0px));background:var(--bg);border-top:1px solid var(--border);box-shadow:0 -8px 16px rgba(0,0,0,0.4);}
+  .invoice-bar-top{display:flex;justify-content:space-between;align-items:baseline;color:var(--parchment);margin-bottom:10px;font-size:13px;letter-spacing:0.04em;text-transform:uppercase;}
+  .invoice-bar-top .amt{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:20px;letter-spacing:0;}
+  .add-picker-wrap{max-height:38vh;overflow-y:auto;margin-bottom:10px;}
   .settings-h{font-family:'Oswald',sans-serif;font-size:15px;letter-spacing:0.05em;text-transform:uppercase;margin-bottom:12px;color:var(--ink);}
   .settings-note{font-size:12px;color:var(--ink-dim);margin-top:8px;line-height:1.4;}
   .history-toolbar-btn{font-size:13px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#fff;border:2px solid transparent;border-radius:12px;padding:14px 6px;box-shadow:0 3px 0 rgba(0,0,0,0.28);transition:transform .08s, box-shadow .08s;}
@@ -291,6 +295,7 @@ let editingCareId = null;   // id of daycare/boarding record being time-edited
 let invoiceSelection = new Set();
 let invoicePrices = {};
 let invoiceAddPicker = false;  // showing the 'which invoice?' chooser
+let invoiceShowInvoiced = false; // include jobs already on an invoice in the picker list
 let invoiceViewOpen = null;   // id of a saved invoice currently expanded in the Invoices tab
 let peeCount = 0;
 let poopCount = 0;
@@ -844,7 +849,7 @@ function resetState(){
   settings = defaultSettings();
   selectedDogIds = []; recoveredWalk = null;
   expandedWalks = new Set();
-  invoiceSelection = new Set(); invoicePrices = {}; invoiceViewOpen = null; invoiceAddPicker = false;
+  invoiceSelection = new Set(); invoicePrices = {}; invoiceViewOpen = null; invoiceAddPicker = false; invoiceShowInvoiced = false;
   historyFilter = 'all'; historyTypeFilter = 'all'; historyStatusFilter = 'all'; historyPanel = null;
 }
 
@@ -2716,7 +2721,7 @@ function renderHistoryStatsHtml(){
 
 function renderAddPickerHtml(){
   const open = state.invoices.filter(i=>!i.paid).sort((a,b)=> new Date(b.createdAt)-new Date(a.createdAt));
-  let h = `<div style="margin-top:14px;"><div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--ink-dim);">Add to which invoice?</div>`;
+  let h = `<div style="margin-top:14px;"><div style="font-size:12px;text-transform:uppercase;letter-spacing:0.06em;color:var(--parchment);">Add to which invoice?</div>`;
   open.forEach(inv=>{
     const d = new Date(inv.createdAt).toLocaleDateString(undefined,{month:'short',day:'numeric'});
     h += `<button class="add-picker-row" data-addto="${inv.id}"><strong>${inv.dogNames||'Invoice'}</strong><br>${d} · ${inv.items.length} item${inv.items.length!==1?'s':''} · $${inv.total.toFixed(2)}</button>`;
@@ -2732,13 +2737,20 @@ function renderHistoryInvoiceHtml(){
     <button class="btn-back" id="historyInvoiceDoneBtn" style="width:100%;margin-top:10px;">Back to History</button>`;
   }
 
-  const items = everything
+  const itemsAll = everything
     .filter(x => (historyFilter==='all' || x.record.dogIds.includes(historyFilter)) && (historyTypeFilter==='all' || x.type===historyTypeFilter) && statusMatches(x.type, x.id))
     .sort((a,b)=> invRecordDate(b.type,b.record) - invRecordDate(a.type,a.record));
+  const lockedCount = itemsAll.filter(x=> taskStatus(x.type,x.id)!=='none').length;
+  // jobs already on an invoice stay out of the way, unless asked for (or filtered to by payment status)
+  const showLocked = invoiceShowInvoiced || historyStatusFilter!=='all';
+  const items = showLocked ? itemsAll : itemsAll.filter(x=> taskStatus(x.type,x.id)==='none');
 
   let html = '';
+  if(lockedCount>0 && historyStatusFilter==='all'){
+    html += `<div class="active-filter-chip" id="toggleInvoicedBtn">${invoiceShowInvoiced ? 'Hide' : 'Show'} ${lockedCount} job${lockedCount!==1?'s':''} already on an invoice</div>`;
+  }
   if(items.length===0){
-    html += `<div class="card"><div class="empty" style="color:var(--ink-dim);">No records match the current filter.</div></div>`;
+    html += `<div class="card"><div class="empty" style="color:var(--ink-dim);">${lockedCount>0 && !showLocked ? 'Every job here is already on an invoice.' : 'No records match the current filter.'}</div></div>`;
   } else {
     const eligible = items.filter(x=>taskStatus(x.type,x.id)==='none');
     const allSelected = eligible.length>0 && eligible.every(x=>invoiceSelection.has(x.id));
@@ -2777,31 +2789,21 @@ function renderHistoryInvoiceHtml(){
   }
 
   const selectedItems = items.filter(x=>invoiceSelection.has(x.id) && taskStatus(x.type,x.id)==='none');
+  let barHtml = '';
   if(selectedItems.length>0){
-    let total = 0;
-    html += `<div class="card"><h3 style="margin-bottom:10px;color:var(--ink);">Invoice summary</h3>`;
-    selectedItems.slice().sort((a,b)=> invRecordDate(a.type,a.record) - invRecordDate(b.type,b.record)).forEach(({type, id, record})=>{
-      const d = invRecordDate(type, record);
-      const dateStr = d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
-      const price = parseFloat(invoicePrices[id]) || 0;
-      total += price;
-      html += `<div class="invoice-line" id="invLine_${id}">
-        <div>${dateStr} · ${invRecordTypeLabel(type)} · ${invRecordDurationLabel(type, record)}</div>
-        <div class="invoice-line-price" id="invLinePrice_${id}">$${price.toFixed(2)}</div>
-      </div>`;
-    });
-    html += `<div class="invoice-total-row"><span>Total</span><span id="invoiceTotalVal">$${total.toFixed(2)}</span></div>
-      <div class="row2" style="margin-top:16px;">
+    const total = selectedItems.reduce((a,{id})=> a + (parseFloat(invoicePrices[id]) || 0), 0);
+    barHtml = `<div class="invoice-bar">
+      ${invoiceAddPicker ? `<div class="add-picker-wrap">${renderAddPickerHtml()}</div>` : ''}
+      <div class="invoice-bar-top"><span>${selectedItems.length} selected</span><span class="amt" id="invoiceTotalVal">$${total.toFixed(2)}</span></div>
+      <div class="row2">
         <button class="btn-primary" id="generateInvoiceBtn">Generate Invoice</button>
         <button class="btn-start" id="addToInvoiceBtn">Add to Invoice</button>
       </div>
-      ${invoiceAddPicker ? renderAddPickerHtml() : ''}
-      <div class="geo-status" style="margin-top:8px;">Generate starts a new invoice. Add puts these on an unpaid invoice you already made. Share from the Invoices tab.</div>
     </div>`;
   }
 
   html += `<button class="btn-back" id="historyInvoiceDoneBtn" style="width:100%;margin-top:10px;">Back to History</button>`;
-  return html;
+  return html + barHtml;
 }
 
 function renderHistory(container){
@@ -3071,7 +3073,7 @@ function renderHistory(container){
   const sBtn = container.querySelector('#historyStatsBtn');
   if(sBtn) sBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='stats' ? null : 'stats'; render(); });
   const iBtn = container.querySelector('#historyInvoiceBtn');
-  if(iBtn) iBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='invoice' ? null : 'invoice'; invoiceSelection = new Set(); invoicePrices = {}; invoiceAddPicker = false; render(); });
+  if(iBtn) iBtn.addEventListener('click', ()=>{ historyPanel = historyPanel==='invoice' ? null : 'invoice'; invoiceSelection = new Set(); invoicePrices = {}; invoiceAddPicker = false; invoiceShowInvoiced = false; render(); });
   const clearChip = container.querySelector('#clearHistoryFilterChip');
   if(clearChip) clearChip.addEventListener('click', ()=>{ historyFilter='all'; historyTypeFilter='all'; historyStatusFilter='all'; render(); });
 
@@ -3110,6 +3112,8 @@ function renderHistory(container){
       }
     });
   });
+  const toggleInv = container.querySelector('#toggleInvoicedBtn');
+  if(toggleInv) toggleInv.addEventListener('click', ()=>{ invoiceShowInvoiced = !invoiceShowInvoiced; render(); });
   const generateBtn = container.querySelector('#generateInvoiceBtn');
   if(generateBtn) generateBtn.addEventListener('click', ()=>{ createInvoiceFromSelection(); });
   const addBtn = container.querySelector('#addToInvoiceBtn');
